@@ -36,11 +36,31 @@
 //	                            the value, raw or base64-decoded, contains a
 //	                            token shape: JWT, GitHub token (ghp_, gho_,
 //	                            ghu_, ghs_, ghr_, github_pat_), AWS access key
-//	                            id (AKIA/ASIA), PEM private key, or a URL with
-//	                            embedded user:password. Empty values stay empty.
-//	PodSpec(spec)               deep copy of a pod spec with EnvValue applied to
-//	                            every env[].value of containers, initContainers
-//	                            and ephemeralContainers; valueFrom is kept.
+//	                            id (AKIA/ASIA), PEM private key, Slack token
+//	                            (xox[abprs]-), Google API key (AIza...), Stripe
+//	                            live key (sk_live_/rk_live_), or a URL with
+//	                            embedded [user]:password@. Empty values stay
+//	                            empty.
+//	PodSpec(spec)               deep copy of a pod spec where, for every entry
+//	                            of containers, initContainers and
+//	                            ephemeralContainers:
+//	                            - EnvValue is applied to every env[].value
+//	                              (valueFrom is kept);
+//	                            - httpGet.httpHeaders values of livenessProbe,
+//	                              readinessProbe, startupProbe and lifecycle
+//	                              postStart/preStop are masked when the header
+//	                              name is Authorization, Proxy-Authorization,
+//	                              Cookie, X-Api-Key, X-Auth-Token or matches
+//	                              the credential-name pattern (or EnvValue
+//	                              masks it); names are kept;
+//	                            - in command and args, the value of
+//	                              --name=value / -name=value with a
+//	                              credential-looking name (also inside a
+//	                              single "sh -c ..." string) becomes Redacted,
+//	                              an element that is only such a flag masks the
+//	                              following element unless that starts with
+//	                              "-", and an element with a token shape is
+//	                              masked whole.
 //	Workload(obj)               Object plus PodSpec on spec (Pod), template.spec
 //	                            (PodTemplate), spec.template.spec (Deployment,
 //	                            StatefulSet, DaemonSet, ReplicaSet, Job, ...)
@@ -49,8 +69,13 @@
 //	                            every element of items (lists). Use it for any
 //	                            object returned to a client.
 //
-// Not covered (documented limits): credentials in container args or command,
-// in ConfigMap data, or in annotations that are not JSON.
+// A Secret's metadata keeps name, namespace, labels, ownerReferences,
+// timestamps, resourceVersion and uid, but every annotation value becomes
+// Redacted (keys kept).
+//
+// Not covered (documented limits): other credential forms in command/args
+// (for example "--password value" inside one shell string), credentials in
+// ConfigMap data, and in annotations that are not JSON.
 package redact
 
 import (
@@ -122,8 +147,22 @@ var (
 		regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),                            // GitHub fine-grained
 		regexp.MustCompile(`(AKIA|ASIA)[0-9A-Z]{16}`),                                 // AWS key id
 		regexp.MustCompile(`(?i)-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----`),                // PEM
-		regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`),           // URL credentials
+		regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@`),           // URL credentials (user may be empty)
+		regexp.MustCompile(`xox[abprs]-[A-Za-z0-9-]{10,}`),                            // Slack
+		regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`),                                   // Google API key
+		regexp.MustCompile(`[sr]k_live_[0-9A-Za-z]{10,}`),                             // Stripe live key
 	}
+	// credHeader lists HTTP header names whose values are always masked, in
+	// addition to names matching credName.
+	credHeader = map[string]bool{
+		"authorization": true, "proxy-authorization": true, "cookie": true,
+		"x-api-key": true, "x-auth-token": true,
+	}
+	// flagAssign matches -name=value / --name=value at the start of an
+	// argument or after whitespace (inline in an "sh -c" string).
+	flagAssign = regexp.MustCompile(`(^|\s)(--?[A-Za-z0-9][A-Za-z0-9_.-]*)=([^\s'"]+)`)
+	// bareFlag matches an argument that is only a flag name.
+	bareFlag     = regexp.MustCompile(`^--?[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 	b64Encodings = []*base64.Encoding{
 		base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding,
 	}
@@ -176,6 +215,14 @@ func scrubTree(v any, asSecret bool) {
 			for k, val := range t {
 				if !secretKeep[strings.ToLower(k)] {
 					t[k] = redactValue(val)
+					continue
+				}
+				if md, ok := val.(map[string]any); ok && strings.EqualFold(k, "metadata") {
+					for mk, mv := range md {
+						if strings.EqualFold(mk, "annotations") {
+							md[mk] = redactValue(mv)
+						}
+					}
 				}
 			}
 		}
@@ -329,34 +376,109 @@ func maskPodSpec(spec map[string]any) {
 			continue
 		}
 		for _, c := range list {
-			cm, ok := c.(map[string]any)
-			if !ok {
-				continue
-			}
-			env, ok := lookup(cm, "env").([]any)
-			if !ok {
-				continue
-			}
-			for _, e := range env {
-				em, ok := e.(map[string]any)
-				if !ok {
-					continue
-				}
-				name := fmt.Sprint(lookup(em, "name"))
-				for ek, ev := range em {
-					if !strings.EqualFold(ek, "value") || ev == nil {
-						continue
-					}
-					sv, isStr := ev.(string)
-					if !isStr {
-						sv = fmt.Sprint(ev)
-					}
-					if masked := EnvValue(name, sv); masked != sv {
-						em[ek] = masked
-					}
-				}
+			if cm, ok := c.(map[string]any); ok {
+				maskContainer(cm)
 			}
 		}
+	}
+}
+
+// httpHandlerPaths are the container fields that may hold an httpGet action.
+var httpHandlerPaths = [][]string{
+	{"livenessProbe"}, {"readinessProbe"}, {"startupProbe"},
+	{"lifecycle", "postStart"}, {"lifecycle", "preStop"},
+}
+
+func maskContainer(c map[string]any) {
+	if env, ok := lookup(c, "env").([]any); ok {
+		maskNameValues(env, EnvValue)
+	}
+	for _, p := range httpHandlerPaths {
+		var cur any = c
+		for _, k := range append(append([]string{}, p...), "httpGet", "httpHeaders") {
+			mm, ok := cur.(map[string]any)
+			if !ok {
+				cur = nil
+				break
+			}
+			cur = lookup(mm, k)
+		}
+		if hdrs, ok := cur.([]any); ok {
+			maskNameValues(hdrs, headerValue)
+		}
+	}
+	for k, v := range c {
+		switch strings.ToLower(k) {
+		case "command", "args":
+			if l, ok := v.([]any); ok {
+				maskArgs(l)
+			}
+		}
+	}
+}
+
+// headerValue masks an HTTP header value by header name or value shape.
+func headerValue(name, value string) string {
+	if value != "" && credHeader[strings.ToLower(strings.TrimSpace(name))] {
+		return Redacted
+	}
+	return EnvValue(name, value)
+}
+
+// maskNameValues applies mask to the value of every {name, value} entry,
+// keeping names and any other field (such as valueFrom).
+func maskNameValues(list []any, mask func(name, value string) string) {
+	for _, e := range list {
+		em, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := fmt.Sprint(lookup(em, "name"))
+		for ek, ev := range em {
+			if !strings.EqualFold(ek, "value") || ev == nil {
+				continue
+			}
+			sv, isStr := ev.(string)
+			if !isStr {
+				sv = fmt.Sprint(ev)
+			}
+			if masked := mask(name, sv); masked != sv {
+				em[ek] = masked
+			}
+		}
+	}
+}
+
+// maskArgs masks credential values in a command or args list in place.
+func maskArgs(l []any) {
+	maskNext := false
+	for i, a := range l {
+		s, ok := a.(string)
+		if !ok {
+			continue
+		}
+		if maskNext {
+			maskNext = false
+			if !strings.HasPrefix(s, "-") {
+				l[i] = Redacted
+				continue
+			}
+		}
+		if hasToken(s) {
+			l[i] = Redacted
+			continue
+		}
+		if bareFlag.MatchString(s) {
+			maskNext = credName.MatchString(s)
+			continue
+		}
+		l[i] = flagAssign.ReplaceAllStringFunc(s, func(m string) string {
+			sub := flagAssign.FindStringSubmatch(m)
+			if !credName.MatchString(sub[2]) {
+				return m
+			}
+			return sub[1] + sub[2] + "=" + Redacted
+		})
 	}
 }
 

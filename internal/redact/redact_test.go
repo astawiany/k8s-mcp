@@ -392,3 +392,121 @@ func TestWorkloadAppliesObjectRules(t *testing.T) {
 	out := Workload(obj(t, `{"kind":"Secret","data":{"k":"WLSECRET"}}`))
 	assertAbsent(t, out, "WLSECRET")
 }
+
+// Fix round 1.
+
+func TestEnvValueFixRound1(t *testing.T) {
+	cases := []struct {
+		name, value string
+		masked      bool
+	}{
+		{"REDIS_URL", "redis://:hunter2@redis:6379", true},
+		{"U", "redis://:hunter2@redis:6379", true},
+		{"U", "http://host:8080/path", false},
+		{"U", "https://example.com/a?b=c", false},
+		{"X", "xoxb-1234567890-abcdefghij", true},
+		{"X", "xoxp-1234567890-abcdefghij", true},
+		{"X", "AIza" + strings.Repeat("A", 35), true},
+		{"X", "sk_live_" + strings.Repeat("a", 24), true},
+		{"X", "rk_live_" + strings.Repeat("a", 24), true},
+		{"X", "sk_test_short", false},
+	}
+	for _, c := range cases {
+		got := EnvValue(c.name, c.value)
+		if c.masked && got != Redacted {
+			t.Errorf("EnvValue(%q, %q) = %q, want masked", c.name, c.value, got)
+		}
+		if !c.masked && got != c.value {
+			t.Errorf("EnvValue(%q, %q) = %q, want unchanged", c.name, c.value, got)
+		}
+	}
+}
+
+func TestPodSpecHTTPHeadersMasked(t *testing.T) {
+	hdrs := `{"httpGet":{"path":"/healthz","port":8080,"httpHeaders":[
+		{"name":"Authorization","value":"Bearer HDRLEAK1"},
+		{"name":"Proxy-Authorization","value":"HDRLEAK2"},
+		{"name":"Cookie","value":"session=HDRLEAK3"},
+		{"name":"X-Api-Key","value":"HDRLEAK4"},
+		{"name":"X-Auth-Token","value":"HDRLEAK5"},
+		{"name":"X-Client-Secret","value":"HDRLEAK6"},
+		{"name":"Accept","value":"application/json"}]}}`
+	ctr := `{"name":"c","livenessProbe":` + hdrs + `,"readinessProbe":` + hdrs + `,"startupProbe":` + hdrs +
+		`,"lifecycle":{"postStart":` + hdrs + `,"preStop":` + hdrs + `}}`
+	src := `{"containers":[` + ctr + `],"initContainers":[` + ctr + `],"ephemeralContainers":[` + ctr + `]}`
+	in := obj(t, src)
+	out := PodSpec(in)
+	assertAbsent(t, out, "HDRLEAK")
+	for _, list := range []string{"containers", "initContainers", "ephemeralContainers"} {
+		for _, p := range [][]any{{"livenessProbe"}, {"readinessProbe"}, {"startupProbe"}, {"lifecycle", "postStart"}, {"lifecycle", "preStop"}} {
+			path := append(append([]any{list, 0}, p...), "httpGet", "httpHeaders")
+			h := get(t, out, path...).([]any)
+			if len(h) != 7 || get(t, h, 0, "name") != "Authorization" || get(t, h, 0, "value") != Redacted {
+				t.Fatalf("%v: headers = %v", path, h)
+			}
+			if get(t, h, 6, "value") != "application/json" {
+				t.Fatalf("%v: harmless header changed: %v", path, h)
+			}
+		}
+	}
+	if !reflect.DeepEqual(in, obj(t, src)) {
+		t.Fatal("PodSpec mutated its input")
+	}
+}
+
+func TestPodSpecArgsCommandMasked(t *testing.T) {
+	src := `{"containers":[{"name":"c",
+		"command":["/bin/app","--db-password=ARGLEAK1","--token","ARGLEAK2","-api-key=ARGLEAK3"],
+		"args":["--password","ARGLEAK4","--log-level=debug","--port","8080","--verbose","--client_secret=ARGLEAK5",
+			"sh -c 'mysql --password=ARGLEAK6 db'","--auth-enabled","--next-flag"]}],
+		"initContainers":[{"name":"i","args":["--secret=ARGLEAK7"]}],
+		"ephemeralContainers":[{"name":"e","command":["--token","ARGLEAK8"]}]}`
+	in := obj(t, src)
+	out := PodSpec(in)
+	assertAbsent(t, out, "ARGLEAK")
+	want := []any{"/bin/app", "--db-password=" + Redacted, "--token", Redacted, "-api-key=" + Redacted}
+	if got := get(t, out, "containers", 0, "command"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("command = %v, want %v", got, want)
+	}
+	args := get(t, out, "containers", 0, "args").([]any)
+	for i, w := range map[int]string{0: "--password", 1: Redacted, 2: "--log-level=debug", 3: "--port", 4: "8080",
+		5: "--verbose", 6: "--client_secret=" + Redacted, 8: "--auth-enabled", 9: "--next-flag"} {
+		if args[i] != w {
+			t.Fatalf("args[%d] = %v, want %q (args %v)", i, args[i], w, args)
+		}
+	}
+	if !reflect.DeepEqual(in, obj(t, src)) {
+		t.Fatal("PodSpec mutated its input")
+	}
+}
+
+func TestWorkloadProbeHeadersAndArgs(t *testing.T) {
+	out := Workload(obj(t, `{"kind":"Deployment","spec":{"template":{"spec":{"containers":[{"name":"c",
+		"args":["--api-token=WLARG"],
+		"livenessProbe":{"httpGet":{"httpHeaders":[{"name":"Authorization","value":"Bearer opaquetoken123"}]}}}]}}}}`))
+	assertAbsent(t, out, "WLARG", "opaquetoken123")
+}
+
+func TestObjectSecretMetadata(t *testing.T) {
+	in := obj(t, `{"apiVersion":"v1","kind":"Secret","metadata":{
+		"name":"s","namespace":"ns","labels":{"app":"web"},"uid":"u-1","resourceVersion":"42",
+		"creationTimestamp":"2026-01-01T00:00:00Z","ownerReferences":[{"kind":"Deployment","name":"web"}],
+		"managedFields":[{"manager":"m"}],
+		"annotations":{"note":"ANNLEAK","`+lastApplied+`":"{\"kind\":\"Secret\",\"data\":{\"k\":\"ANNLEAK\"}}"}},
+		"data":{"k":"dg=="}}`)
+	out := Object(in)
+	assertAbsent(t, out, "ANNLEAK", "managedFields")
+	ann := get(t, out, "metadata", "annotations").(map[string]any)
+	if len(ann) != 2 || ann["note"] != Redacted || ann[lastApplied] != Redacted {
+		t.Fatalf("annotations = %v", ann)
+	}
+	md := get(t, out, "metadata").(map[string]any)
+	for _, k := range []string{"name", "namespace", "labels", "uid", "resourceVersion", "creationTimestamp", "ownerReferences"} {
+		if !reflect.DeepEqual(md[k], in["metadata"].(map[string]any)[k]) {
+			t.Fatalf("metadata.%s = %v, want kept", k, md[k])
+		}
+	}
+	// SecretList items get the same treatment.
+	list := Object(obj(t, `{"kind":"SecretList","items":[{"metadata":{"name":"a","annotations":{"n":"ANNLEAK"}}}]}`))
+	assertAbsent(t, list, "ANNLEAK")
+}
