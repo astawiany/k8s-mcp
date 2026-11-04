@@ -59,7 +59,7 @@ func registerClusterInfo(s *server.Server) {
 			"metrics-server, Flux and Gateway API are served. A node with no Ready condition counts as not ready. " +
 			"If nodes cannot be listed (RBAC, timeout, unreachable) or API discovery fails, the rest is still " +
 			"returned with nodesNote / apiGroupsNote set: that part is unknown, not zero. totalIsLowerBound=true " +
-			"means the node count stopped early. Reads nodes only; returns no server URLs.",
+			"means the node count stopped early. Reads nodes only; returns no server URLs. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, clusterInfo)
 }
 

@@ -59,7 +59,7 @@ func registerList(s *server.Server) {
 			"others: the Ready condition, else the first False condition, else status.phase). One page per call: " +
 			"limit defaults to 100 and is capped at 200; when more objects exist truncated=true and continue holds " +
 			"the token for the next page (total is the server's estimate). namespace is ignored for cluster-scoped " +
-			"kinds. Secrets are refused (kind Secret, secrets, any alias).",
+			"kinds. Secrets are refused (kind Secret, secrets, any alias). Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, listResources)
 }
 

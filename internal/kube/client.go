@@ -51,6 +51,15 @@ type Client interface {
 	PodMetrics(ctx context.Context, ns string) ([]map[string]any, error)
 }
 
+// MutatingMethodPrefixes returns the method-name prefixes that Client and
+// Factory must never have (write or interactive verbs; "Delete" also covers
+// DeleteCollection). readonly_test.go checks the declarations by AST and
+// test/injection checks the compiled method sets by reflection.
+func MutatingMethodPrefixes() []string {
+	return []string{"Create", "Update", "Patch", "Delete", "Apply", "Exec", "PortForward",
+		"Attach", "Evict", "Scale", "Set"}
+}
+
 // Factory hands out one cached Client per kubeconfig context.
 type Factory interface {
 	// Contexts lists the kubeconfig contexts sorted by name. It never returns

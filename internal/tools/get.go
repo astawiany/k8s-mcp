@@ -29,7 +29,7 @@ func registerGet(s *server.Server) {
 			"Credential-looking values are masked (env values, probe headers and command flags with credential " +
 			"names or token shapes, Secrets embedded in annotations such as last-applied-configuration). " +
 			"Secrets are refused (kind Secret, secrets, any alias). Long strings and documents over 64 KiB are " +
-			"truncated with a marker.",
+			"truncated with a marker. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, getResource)
 }
 

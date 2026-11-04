@@ -16,7 +16,7 @@ func registerListContexts(s *server.Server) {
 		Name: "list_contexts",
 		Description: "List the kubeconfig contexts as [{name, current, allowed}]. Contexts outside the " +
 			"server's --contexts allowlist are listed with allowed=false and cannot be used by any tool. " +
-			"Never returns server URLs, users or credentials.",
+			"Never returns server URLs, users or credentials. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, listContexts)
 }
 

@@ -87,7 +87,7 @@ func registerLogs(s *server.Server) {
 			"across two lines is not detected); lines over 2000 bytes are cut; the log is cut from " +
 			"the oldest end to about 56 KiB (truncated=true, also when older lines may exist beyond tailLines). If " +
 			"the log looks like a Kubernetes Secret manifest the whole log is withheld (log empty, hidden=true with " +
-			"the reason and a hint). A pod with several containers needs container.",
+			"the reason and a hint). A pod with several containers needs container. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, podLogs)
 }
 

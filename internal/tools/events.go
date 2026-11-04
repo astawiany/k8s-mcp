@@ -57,7 +57,7 @@ func registerEvents(s *server.Server) {
 			"{type, reason, message, object (Kind/name), namespace, count, firstSeen, lastSeen, warning}. " +
 			"Sorted warnings first, then oldest to newest within each group. At most 200 events are returned " +
 			"(warnings kept first, then the newest others) with truncated=true and total when more matched; at " +
-			"most the 5000 newest events are read. involvedKind Secret is refused.",
+			"most the 5000 newest events are read. involvedKind Secret is refused. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, getEvents)
 }
 

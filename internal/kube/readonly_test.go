@@ -14,10 +14,7 @@ import (
 
 // Method-name prefixes that indicate a mutating or interactive operation. The
 // Client interface must not have any method starting with one of these.
-var forbiddenInterfacePrefixes = []string{
-	"Create", "Update", "Patch", "Delete", "Apply", "Exec", "PortForward",
-	"Attach", "Evict", "Scale", "Set",
-}
+var forbiddenInterfacePrefixes = MutatingMethodPrefixes()
 
 // Selector names whose call would write to a cluster when invoked on a
 // client-go client. No non-test file in this package may call them.

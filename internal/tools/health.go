@@ -77,7 +77,7 @@ func registerHealth(s *server.Server) {
 			"scaled-down old ReplicaSets, are dropped. Only status-derived fields are returned, never pod specs " +
 			"or env. Unhealthy pods first; at most 50 pods returned (truncated=true when more exist or the " +
 			"pod list was cut at 200). Every finding has an evidenceRef such as pod/<name>/lastState. Other " +
-			"kinds are an error.",
+			"kinds are an error. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, workloadHealth)
 }
 

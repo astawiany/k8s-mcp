@@ -46,7 +46,7 @@ func registerDescribe(s *server.Server) {
 			"values masked as in get_resource. conditions are status.conditions as {type, status, reason, " +
 			"message, lastTransitionTime} (at most 200). events are the events about this object, oldest first " +
 			"(newest last), warning=true on warnings, at most the 50 newest (eventsTruncated=true when more). " +
-			"If events cannot be read the object is still returned with eventsNote set. Secrets are refused.",
+			"If events cannot be read the object is still returned with eventsNote set. Secrets are refused. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, describeResource)
 }
 

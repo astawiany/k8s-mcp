@@ -57,7 +57,7 @@ func registerTop(s *server.Server) {
 			"cpuMillicores, memoryBytes} sorted by CPU, highest first; pod rows add cpuPercentOfRequests and " +
 			"memoryPercentOfRequests when every container of the pod declares that request. At most 200 rows " +
 			"(truncated=true and total when more). Without metrics-server the result is {available: false, " +
-			"message} instead of an error.",
+			"message} instead of an error. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, top)
 }
 
