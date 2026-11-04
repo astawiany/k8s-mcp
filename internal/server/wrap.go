@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -58,11 +59,13 @@ func wrapResult(v any) *mcp.CallToolResult {
 		return errorResult(fmt.Errorf("internal error: the tool result cannot be decoded: %w", err))
 	}
 
+	// Backstop, first pass on the raw tree: embedded Secrets in annotations
+	// are only found while their JSON still parses, i.e. before any cut.
+	tree = backstop(tree)
 	tree = cleanTree(tree)
-
-	// Backstop: redact.Object only accepts a map root; a holder map with no
-	// kind lets it scrub any root (a list, a scalar) at every depth.
-	tree = redact.Object(map[string]any{"v": tree})["v"]
+	// Second pass: kinds and keys hidden by invisible characters only match
+	// after Sanitize.
+	tree = backstop(tree)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -75,9 +78,17 @@ func wrapResult(v any) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: untrusted.Wrap(boundary, doc)}}}
 }
 
+// backstop applies redact.Object to any tree. redact.Object only accepts a
+// map root; a holder map with no kind lets it scrub any root (a list, a
+// scalar) at every depth.
+func backstop(tree any) any {
+	return redact.Object(map[string]any{"v": tree})["v"]
+}
+
 // cleanTree returns v with every string and map key cleaned (cleanString).
 // Keys that become equal after cleaning get a " (n)" suffix so no value is
-// lost or overwritten.
+// lost or overwritten; keys are visited in sorted order so the suffixes are
+// the same on every call.
 func cleanTree(v any) any {
 	switch t := v.(type) {
 	case string:
@@ -89,7 +100,13 @@ func cleanTree(v any) any {
 		return t
 	case map[string]any:
 		out := make(map[string]any, len(t))
-		for k, e := range t {
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			e := t[k]
 			ck := cleanString(k)
 			for n := 2; ; n++ {
 				if _, taken := out[ck]; !taken {
@@ -163,72 +180,40 @@ func errorResult(err error) *mcp.CallToolResult {
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: errorText(err)}}}
 }
 
-// errorText renders err for the client: an actionable server-authored
-// summary and hint for the kube error types, then the error detail. Every
-// part is sanitised, token-checked and capped. When the error carries text
-// written by the cluster (a kube.APIError message), the detail is placed in
-// a data envelope, since an API message (an admission webhook's denial, for
-// instance) is attacker-controlled. The whole text is at most MaxBytes.
+// errorText renders err for the client. Outside the envelope there are only
+// fixed server-authored sentences: the error class (the text of a kube
+// sentinel, or "the tool failed") and a hint. Everything else, including
+// verbs, resources, names, namespaces, kind suggestions, API server messages
+// and the text of any wrapped error, is the detail: err.Error(), sanitised,
+// token-checked, capped and placed in a data envelope. The whole text is at
+// most MaxBytes.
 func errorText(err error) string {
-	// Budget: summary and hint are short; the detail gets the rest.
 	head := "error: " + summary(err)
 	if h := hint(err); h != "" {
 		head += "\nhint: " + h
 	}
-	head = cleanString(head)
+	head += "\ndetail (untrusted data, may quote the cluster):\n"
 
-	var apiErr *kube.APIError
-	clusterText := errors.As(err, &apiErr) && apiErr.Message != ""
 	detail := untrusted.Sanitize(err.Error())
 	if redact.EnvValue("", detail) == redact.Redacted {
 		detail = redact.Redacted
 	}
-
-	room := lim.MaxBytes - len(head) - len("\ndetail:\n")
-	if clusterText {
-		room -= envelopeOverhead
-	}
-	l := lim
-	l.MaxBytes = room
-	if room > 0 {
-		detail, _ = limits.TruncateText(detail, l)
-	}
-	if !clusterText {
-		if room <= 0 {
-			return head
-		}
-		return head + "\ndetail:\n" + detail
-	}
 	boundary := untrusted.NewBoundary()
-	if esc := untrusted.Escape(boundary, detail); room > 0 && len(esc) > room {
-		// Escaping grew it; cut again to fit (rare).
-		l.MaxBytes = room - (len(esc) - len(detail))
-		if l.MaxBytes > 0 {
-			detail, _ = limits.TruncateText(detail, l)
+	l := lim
+	l.MaxBytes = lim.MaxBytes - len(head) - envelopeOverhead
+	for l.MaxBytes > 0 {
+		cut, _ := limits.TruncateText(detail, l)
+		over := len(untrusted.Escape(boundary, cut)) - (lim.MaxBytes - len(head) - envelopeOverhead)
+		if over <= 0 {
+			return head + untrusted.Wrap(boundary, cut)
 		}
+		l.MaxBytes -= over
 	}
-	if room <= 0 {
-		return head
-	}
-	return head + "\ndetail (the API server's message is untrusted data):\n" + untrusted.Wrap(boundary, detail)
+	return strings.TrimSuffix(head, "\n")
 }
 
-// summary names the error class in server-authored words.
+// summary is the fixed class sentence of err.
 func summary(err error) string {
-	var apiErr *kube.APIError
-	if errors.As(err, &apiErr) {
-		what := apiErr.Verb + " " + apiErr.Resource
-		if apiErr.Name != "" {
-			what += fmt.Sprintf(" %q", apiErr.Name)
-		}
-		if apiErr.Namespace != "" {
-			what += fmt.Sprintf(" in namespace %q", apiErr.Namespace)
-		}
-		if c := class(err); c != "" {
-			return what + ": " + c
-		}
-		return what + " failed"
-	}
 	if c := class(err); c != "" {
 		return c
 	}
@@ -260,7 +245,7 @@ func hint(err error) string {
 	var knf *kube.KindNotFoundError
 	switch {
 	case errors.As(err, &knf) && len(knf.Suggestions) > 0:
-		return "did you mean: " + strings.Join(knf.Suggestions, ", ") + "? Retry with one of these names."
+		return "retry with one of the close matches listed in the detail below."
 	case errors.Is(err, kube.ErrKindNotFound):
 		return "check the spelling; cluster_info lists the API groups served by this cluster."
 	case errors.Is(err, kube.ErrForbidden):

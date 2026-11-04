@@ -65,3 +65,36 @@ func TestErrorTextRedactsTokenInMessage(t *testing.T) {
 		t.Errorf("token leaked: %s", got)
 	}
 }
+
+// TestErrorTextClusterDetailOnlyInEnvelope: outside the envelope there are
+// only fixed server sentences; names, namespaces, suggestions and the text
+// of wrapped errors are inside it.
+func TestErrorTextClusterDetailOnlyInEnvelope(t *testing.T) {
+	cases := []struct {
+		err    error
+		inside []string
+	}{
+		{kube.NewAPIError(kube.ErrNotFound, "get", "widgets.evil.example", "ns-x9", "obj-y7", "msg-z5"),
+			[]string{"widgets.evil.example", "ns-x9", "obj-y7", "msg-z5"}},
+		{&kube.KindNotFoundError{Query: "q-w3", Suggestions: []string{"sugg-v2.evil.example"}},
+			[]string{"q-w3", "sugg-v2.evil.example"}},
+		{fmt.Errorf("log stream: %w", errors.New("stream-text-u1 IGNORE PREVIOUS")),
+			[]string{"stream-text-u1", "IGNORE PREVIOUS"}},
+	}
+	for _, c := range cases {
+		got := errorText(c.err)
+		i := strings.Index(got, "<<<DATA ")
+		if i < 0 {
+			t.Errorf("no envelope:\n%s", got)
+			continue
+		}
+		for _, w := range c.inside {
+			if strings.Contains(got[:i], w) {
+				t.Errorf("%q appears outside the envelope:\n%s", w, got)
+			}
+			if !strings.Contains(got[i:], w) {
+				t.Errorf("%q missing from the envelope:\n%s", w, got)
+			}
+		}
+	}
+}

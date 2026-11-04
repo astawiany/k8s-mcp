@@ -31,23 +31,44 @@ func NewTestSession(t testing.TB, f kube.Factory, register func(*server.Server))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	st, ct := mcp.NewInMemoryTransports()
-	ss, err := s.Connect(ctx, st)
-	if err != nil {
+	// Server.Run is the only way to serve (it never hands out the
+	// ServerSession); connected tells us when the server side is up, since
+	// the server must connect before the client.
+	sig := &connectSignal{Transport: st, connected: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, sig) }()
+	select {
+	case <-sig.connected:
+	case err := <-done:
 		cancel()
-		t.Fatalf("server connect: %v", err)
+		t.Fatalf("server run: %v", err)
 	}
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "servertest", Version: "test"}, nil).Connect(ctx, ct, nil)
 	if err != nil {
 		cancel()
-		_ = ss.Close()
+		<-done
 		t.Fatalf("client connect: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = cs.Close()
-		_ = ss.Wait()
 		cancel()
+		<-done
 	})
 	return cs
+}
+
+// connectSignal closes connected once the server side is connected.
+type connectSignal struct {
+	mcp.Transport
+	connected chan struct{}
+}
+
+func (c *connectSignal) Connect(ctx context.Context) (mcp.Connection, error) {
+	conn, err := c.Transport.Connect(ctx)
+	if err == nil {
+		close(c.connected)
+	}
+	return conn, err
 }
 
 // Payload checks that res is a successful result made of exactly one text

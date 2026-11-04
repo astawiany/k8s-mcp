@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -331,10 +334,11 @@ func TestClusterErrorMessageEnveloped(t *testing.T) {
 	if _, ok := servertest.Unwrap(text[i:]); !ok {
 		t.Errorf("envelope is not well formed:\n%s", text[i:])
 	}
-	for _, want := range []string{"list", "pods", "RBAC"} {
-		if !strings.Contains(text[:i], want) {
-			t.Errorf("summary lacks %q:\n%s", want, text)
-		}
+	if !strings.Contains(text[:i], "RBAC") {
+		t.Errorf("summary lacks the error class:\n%s", text)
+	}
+	if !strings.Contains(text[i:], `list pods in namespace "prod"`) {
+		t.Errorf("detail lacks verb, resource and namespace:\n%s", text)
 	}
 }
 
@@ -489,5 +493,88 @@ func TestNoForbiddenImports(t *testing.T) {
 				t.Errorf("%s imports %s", fn, p)
 			}
 		}
+	}
+}
+
+func TestBackstopSeesLongAnnotationsBeforeCuts(t *testing.T) {
+	// An embedded Secret in a non-last-applied annotation is only scrubbed
+	// while its JSON still parses: the per-string line cut (2000 bytes)
+	// would break it, so the backstop must also run on the raw tree.
+	const leak = "TEAKEDVALUE123"
+	ann := `{"apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"},"pad":"` + strings.Repeat("x", 2500) + `"}`
+	body := payload(t, map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": "cm", "annotations": map[string]any{"example.com/cfg": ann}}})
+	if strings.Contains(body, leak) {
+		t.Errorf("embedded Secret value in a long annotation leaked")
+	}
+}
+
+func TestKeyCollisionSuffixesDeterministic(t *testing.T) {
+	v := map[string]any{"a\u200bb": "one", "ab": "two", "a\u200cb": "three", "a\u2060b": "four", "a\ufeffb": "five"}
+	first := payload(t, v)
+	for i := 0; i < 20; i++ {
+		if got := payload(t, v); got != first {
+			t.Fatalf("collision suffixes differ between calls:\n%s\n%s", first, got)
+		}
+	}
+}
+
+// TestNoServerSessionSideChannels: a ServerSession can send logs or sampling
+// requests to the client outside the result wrapper. No non-test file in
+// internal/ outside package server may call .Log( or .CreateMessage( where
+// the go-sdk mcp package is imported.
+func TestNoServerSessionSideChannels(t *testing.T) {
+	err := filepath.WalkDir("..", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		if filepath.Dir(p) == filepath.Join("..", "server") {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, 0)
+		if err != nil {
+			return err
+		}
+		usesMCP := false
+		for _, im := range f.Imports {
+			if strings.Contains(im.Path.Value, "modelcontextprotocol/go-sdk") {
+				usesMCP = true
+			}
+		}
+		if !usesMCP {
+			return nil
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Log" || sel.Sel.Name == "CreateMessage") {
+					t.Errorf("%s calls .%s( on what may be an mcp.ServerSession", p, sel.Sel.Name)
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServerHasNoConnect(t *testing.T) {
+	if _, ok := reflect.TypeOf(&server.Server{}).MethodByName("Connect"); ok {
+		t.Errorf("Server.Connect hands out an *mcp.ServerSession; keep sessions inside Run")
+	}
+}
+
+func TestBackstopSeesKindHiddenByInvisibles(t *testing.T) {
+	// "Sec\u200bret" is not a Secret kind until Sanitize removes the
+	// zero-width space: only the second backstop pass catches it.
+	const leak = "c2VjcmV0LXZhbHVl"
+	body := payload(t, map[string]any{"kind": "Sec\u200bret", "metadata": map[string]any{"name": "s"},
+		"data": map[string]any{"k": leak}})
+	if strings.Contains(body, leak) {
+		t.Errorf("Secret with an invisible character in its kind leaked: %s", body)
 	}
 }
