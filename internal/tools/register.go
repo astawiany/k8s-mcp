@@ -15,4 +15,5 @@ func RegisterAll(s *server.Server) {
 	registerEvents(s)
 	registerLogs(s)
 	registerTop(s)
+	registerHealth(s)
 }
