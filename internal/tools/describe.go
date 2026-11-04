@@ -40,7 +40,8 @@ func registerDescribe(s *server.Server) {
 	server.Register(s, &mcp.Tool{
 		Name: "describe_resource",
 		Description: "Describe one object like kubectl describe: {object, conditions, events}. object keeps " +
-			"apiVersion, kind, metadata (name, namespace, labels, annotations without last-applied-configuration, " +
+			"only apiVersion, kind, metadata, spec and status (so top-level fields such as ConfigMap data or " +
+			"Role rules are not shown; use get_resource for them): metadata (name, namespace, labels, annotations without last-applied-configuration, " +
 			"ownerReferences, creationTimestamp, deletionTimestamp), spec and status, with credential-looking " +
 			"values masked as in get_resource. conditions are status.conditions as {type, status, reason, " +
 			"message, lastTransitionTime} (at most 200). events are the events about this object, oldest first " +
@@ -61,6 +62,12 @@ func describeResource(ctx context.Context, f kube.Factory, in objectIn) (any, er
 		Namespace: o.ns,
 		Name:      str(o.obj, "metadata", "name"),
 		UID:       str(o.obj, "metadata", "uid"),
+	}
+	// The kubelet records Node events with involvedObject.uid set to the
+	// node name, not its UID (kubectl's node describer works around it the
+	// same way): match nodes by kind and name only.
+	if o.res.Group == "" && o.res.Kind == "Node" {
+		ref.UID = ""
 	}
 	evs, err := o.client.Events(ctx, o.ns, ref, 0)
 	switch {

@@ -98,3 +98,41 @@ func TestDescribeCapsEventsKeepingNewest(t *testing.T) {
 		t.Errorf("want the 50 newest, newest last: len=%d truncated=%v first=%+v", len(out.Events), out.EventsTruncated, out.Events[0])
 	}
 }
+
+// withUID sets metadata.uid on obj and returns it.
+func withUID(obj map[string]any, uid string) map[string]any {
+	obj["metadata"].(map[string]any)["uid"] = uid
+	return obj
+}
+
+// aboutUID sets involvedObject.uid on an event and returns it.
+func aboutUID(ev map[string]any, uid string) map[string]any {
+	ev["involvedObject"].(map[string]any)["uid"] = uid
+	return ev
+}
+
+// The kubelet records Node events with involvedObject.uid set to the node
+// name, not the node's UID.
+func TestDescribeNodeIncludesKubeletEvents(t *testing.T) {
+	n := withUID(kube.Object("v1", "Node", "", "n1"), "real-uid-123")
+	ev := aboutUID(kube.Event("default", "e1", "Node", "n1", "Warning", "NodeNotReady", "node not ready", ago(5)), "n1")
+	other := aboutUID(kube.Event("default", "e2", "Node", "n2", "Warning", "Other", "other node", ago(4)), "n2")
+	var out describeOut
+	decode(t, callTool(t, kube.SingleFakeFactory(kube.NewFakeClient(n, ev, other).SetNow(testNow)), "describe_resource",
+		map[string]any{"kind": "node", "name": "n1"}), &out)
+	if got := reasons(out.Events); got != "NodeNotReady" {
+		t.Errorf("want the node's kubelet event only, got %q", got)
+	}
+}
+
+func TestDescribePodExcludesEventsOfPreviousPodWithSameName(t *testing.T) {
+	p := withUID(pod("a", "web-1"), "uid-new")
+	own := aboutUID(kube.Event("a", "e1", "Pod", "web-1", "Normal", "Own", "this pod", ago(5)), "uid-new")
+	stale := aboutUID(kube.Event("a", "e2", "Pod", "web-1", "Warning", "Stale", "previous pod", ago(30)), "uid-old")
+	var out describeOut
+	decode(t, callTool(t, kube.SingleFakeFactory(kube.NewFakeClient(p, own, stale).SetNow(testNow)), "describe_resource",
+		map[string]any{"kind": "pods", "namespace": "a", "name": "web-1"}), &out)
+	if got := reasons(out.Events); got != "Own" {
+		t.Errorf("want only the current pod's events, got %q", got)
+	}
+}
