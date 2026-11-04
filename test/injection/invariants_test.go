@@ -132,7 +132,8 @@ const netDir = "internal/kube"
 func netImport(p string) bool {
 	switch {
 	case p == "net", p == "net/http", strings.HasPrefix(p, "net/http/"), p == "net/rpc", p == "net/smtp",
-		p == "crypto/tls", strings.HasPrefix(p, "golang.org/x/net/"), strings.HasPrefix(p, "k8s.io/client-go"):
+		p == "crypto/tls", strings.HasPrefix(p, "golang.org/x/net/"), strings.HasPrefix(p, "k8s.io/client-go"),
+		p == "golang.org/x/sys/unix", p == "k8s.io/apimachinery/pkg/util/net":
 		return true
 	}
 	return false
@@ -144,13 +145,17 @@ var (
 	// pkg path -> selector names: process starts anywhere, dialers and HTTP
 	// clients outside netDir, SDK transports that dial, spawn or listen.
 	processSelectors = map[string][]string{
-		"os":      {"StartProcess"},
-		"syscall": {"Exec", "ForkExec", "StartProcess"},
+		"os":                    {"StartProcess"},
+		"syscall":               {"Exec", "ForkExec", "StartProcess"},
+		"golang.org/x/sys/unix": {"Exec", "ForkExec", "StartProcess"},
 	}
 	dialSelectors = map[string][]string{
-		"net":        {"Dial", "DialTimeout", "DialTCP", "DialUDP", "DialIP", "DialUnix", "Dialer", "Listen", "ListenTCP", "ListenUDP", "ListenPacket"},
-		"net/http":   {"Client", "Transport", "DefaultClient", "DefaultTransport", "Get", "Post", "PostForm", "Head", "NewRequest", "NewRequestWithContext", "ListenAndServe", "Serve"},
-		"crypto/tls": {"Dial", "DialWithDialer", "Dialer"},
+		"net":                              {"Dial", "DialTimeout", "DialTCP", "DialUDP", "DialIP", "DialUnix", "Dialer", "Listen", "ListenTCP", "ListenUDP", "ListenPacket"},
+		"net/http":                         {"Client", "Transport", "DefaultClient", "DefaultTransport", "Get", "Post", "PostForm", "Head", "NewRequest", "NewRequestWithContext", "ListenAndServe", "Serve"},
+		"crypto/tls":                       {"Dial", "DialWithDialer", "Dialer"},
+		"syscall":                          {"Socket", "Connect"},
+		"golang.org/x/sys/unix":            {"Socket", "Connect"},
+		"k8s.io/apimachinery/pkg/util/net": {"DialerFor", "DialerFunc", "SetTransportDefaults", "SetOldTransportDefaults", "NewProxierWithNoProxyCIDR"},
 		"github.com/modelcontextprotocol/go-sdk/mcp": {"CommandTransport", "StreamableClientTransport", "SSEClientTransport",
 			"StreamableServerTransport", "SSEServerTransport", "NewStreamableHTTPHandler", "NewSSEHandler",
 			"StreamableHTTPHandler", "SSEHandler"},
@@ -220,7 +225,8 @@ func moduleRoot(t *testing.T) string {
 }
 
 // TestModuleSourceBlastRadius scans every non-test .go file of the module
-// outside test/, testdata and hidden directories.
+// (test/ included: the eval payload printer is a binary) outside testdata,
+// vendor and hidden directories.
 func TestModuleSourceBlastRadius(t *testing.T) {
 	root := moduleRoot(t)
 	var scanned []string
@@ -231,7 +237,7 @@ func TestModuleSourceBlastRadius(t *testing.T) {
 		rel, _ := filepath.Rel(root, path)
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if rel != "." && (strings.HasPrefix(d.Name(), ".") || d.Name() == "testdata" || d.Name() == "vendor" || rel == "test") {
+			if rel != "." && (strings.HasPrefix(d.Name(), ".") || d.Name() == "testdata" || d.Name() == "vendor") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -252,7 +258,8 @@ func TestModuleSourceBlastRadius(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, must := range []string{"internal/kube/live.go", "internal/server/wrap.go", "internal/tools/register.go"} {
+	for _, must := range []string{"internal/kube/live.go", "internal/server/wrap.go", "internal/tools/register.go",
+		"test/injection/eval/payload/main.go", "test/injection/corpus/corpus.go"} {
 		if !slices.Contains(scanned, must) {
 			t.Errorf("scan missed %s (scanned %d files)", must, len(scanned))
 		}
@@ -269,8 +276,14 @@ import (
 	"net"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"k8s.io/client-go/dynamic"
+	"syscall"
+	"golang.org/x/sys/unix"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 )
 func f() {
+	syscall.ForkExec("/bin/sh", nil, nil)
+	unix.Exec("/bin/sh", nil, nil)
+	_ = utilnet.DialerFor
 	exec.Command("kubectl", "delete")
 	os.StartProcess("x", nil, nil)
 	_ = &h.Client{}
@@ -282,6 +295,8 @@ func f() {
 	want := []string{
 		"import os/exec", "import net/http outside internal/kube", "import net outside internal/kube",
 		"import k8s.io/client-go/dynamic outside internal/kube",
+		"import golang.org/x/sys/unix outside internal/kube", "import k8s.io/apimachinery/pkg/util/net outside internal/kube",
+		"use syscall.ForkExec", "use golang.org/x/sys/unix.Exec", "use k8s.io/apimachinery/pkg/util/net.DialerFor outside internal/kube",
 		"use os.StartProcess", "use net/http.Client outside internal/kube", "use net.Dial outside internal/kube",
 		"use github.com/modelcontextprotocol/go-sdk/mcp.CommandTransport outside internal/kube",
 	}
@@ -290,7 +305,7 @@ func f() {
 	}
 	// Inside internal/kube only process starts are flagged.
 	got := blastRadiusViolations(t, "internal/kube/live.go", src)
-	if !slices.Equal(got, []string{"import os/exec", "use os.StartProcess"}) {
+	if !slices.Equal(got, []string{"import os/exec", "use syscall.ForkExec", "use golang.org/x/sys/unix.Exec", "use os.StartProcess"}) {
 		t.Errorf("internal/kube violations = %q", got)
 	}
 }
