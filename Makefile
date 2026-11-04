@@ -1,8 +1,16 @@
 include versions.env
 export
 
-.PHONY: lint test vuln
+.PHONY: build lint test vuln
 .DEFAULT_GOAL := test
+
+# VERSION is stamped into the binary with -ldflags "-X main.version=..."
+# (k8s-mcp --version prints it). Override: make build VERSION=v1.2.3
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+# Static, reproducible-path build of the server into bin/k8s-mcp.
+build:
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/k8s-mcp ./cmd/k8s-mcp
 
 lint:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
