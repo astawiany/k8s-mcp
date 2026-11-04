@@ -70,6 +70,8 @@ func TestScrubURLs(t *testing.T) {
 		"ssh://git@host:22/r and https://u:p@h2":          "ssh://[redacted]@host:22/r and https://[redacted]@h2",
 		"https://host/path@v1 no creds":                   "https://host/path@v1 no creds",
 		"plain text":                                      "plain text",
+		"https://u:p@ss@host/x":                           "https://[redacted]@host/x",
+		"https://u:p@ss@host":                             "https://[redacted]@host",
 	}
 	for in, want := range cases {
 		if got := flux.ScrubURLs(in); got != want {
@@ -88,5 +90,28 @@ func TestSummarizeScrubsMessage(t *testing.T) {
 	s = flux.Summarize(map[string]any{"status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "False", "message": tok}}}})
 	if strings.Contains(s.Message, "ghp_") {
 		t.Fatalf("token shape kept: %q", s.Message)
+	}
+}
+
+func TestScrubQueryCredentials(t *testing.T) {
+	r := "[redacted]"
+	cases := map[string]string{
+		"fetch https://h/x?token=abc123def&a=1":       "fetch https://h/x?token=" + r + "&a=1",
+		"https://h/x?access_token=abc123":             "https://h/x?access_token=" + r,
+		"https://h/x?a=1&password=p&sig=s&ref=main":   "https://h/x?a=1&password=" + r + "&sig=" + r + "&ref=main",
+		"https://h/x?%74oken=abc&b=2":                 "https://h/x?%74oken=" + r + "&b=2",
+		"https://h/x?API_KEY=zzz":                     "https://h/x?API_KEY=" + r,
+		"https://h/x#access_token=abc&state=ok":       "https://h/x#access_token=" + r + "&state=ok",
+		"get 'https://h/x?client_secret=abc' failed":  "get 'https://h/x?client_secret=" + r + "' failed",
+		"get \"https://h/x?code=abc\" failed":         "get \"https://h/x?code=" + r + "\" failed",
+		"https://h/x?apikey=abc more text":            "https://h/x?apikey=" + r + " more text",
+		"https://h/x?foo=bar&ref=main&keyword=go&a=b": "https://h/x?foo=bar&ref=main&keyword=go&a=b",
+		"https://h/x?authorization=Bearer&token=":     "https://h/x?authorization=" + r + "&token=",
+		"no url, ref=main token=notinquery":           "no url, ref=main token=notinquery",
+	}
+	for in, want := range cases {
+		if got := flux.ScrubURLs(in); got != want {
+			t.Errorf("ScrubURLs(%q)\n got %q\nwant %q", in, got, want)
+		}
 	}
 }

@@ -86,7 +86,7 @@ func registerFlux(s *server.Server) {
 			"not-Ready objects waiting on dependsOn entries that are not Ready (or missing, or outside what was " +
 			"read). Kinds the cluster does not serve are skipped and listed in missingKinds; with no Flux CRDs the " +
 			"result is installed=false. At most 200 statuses are returned (truncated=true; narrow with namespace, " +
-			"kinds or onlyUnhealthy); summary counts everything read. Only status fields are returned, never spec " +
+			"kinds or onlyUnhealthy); summary counts everything read before onlyUnhealthy and the cap: ready = Ready condition True (a Stalled but Ready object counts as ready), notReady = not Ready, suspended = spec.suspend true (a Ready but suspended object counts in both ready and suspended). Only status fields are returned, never spec " +
 			"contents, and URL credentials in messages are redacted. Read-only: it never reconciles or patches.",
 	}, server.CapRead, fluxStatus)
 }

@@ -10,6 +10,7 @@
 package flux
 
 import (
+	"net/url"
 	"regexp"
 
 	"github.com/astawiany/k8s-mcp/internal/redact"
@@ -79,12 +80,33 @@ func Summarize(obj map[string]any) Status {
 	return s
 }
 
-var userinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/@]+@`)
+// userinfo matches scheme://...@ up to the LAST "@" before the first "/" (or
+// the end), so passwords containing "@" are covered.
+var userinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^\s/]*@`)
 
-// ScrubURLs replaces the userinfo of every URL in s:
-// https://user:pass@host becomes https://[redacted]@host.
+// param matches a query or fragment parameter name=value.
+var param = regexp.MustCompile(`([?&#])([^=&#\s"'<>]+)=([^&#\s"'<>]+)`)
+
+var credName = regexp.MustCompile(`(?i)^(token|access_token|refresh_token|id_token|auth|authorization|password|passwd|pwd|secret|client_secret|api[_-]?key|apikey|key|sig|signature|code|credential)$`)
+
+// ScrubURLs replaces URL credentials in s: the userinfo
+// (https://user:pass@host becomes https://[redacted]@host) and the values of
+// query or fragment parameters whose (URL-decoded) name looks like a
+// credential (?token=abc becomes ?token=[redacted]). Other parameters are
+// left alone.
 func ScrubURLs(s string) string {
-	return userinfo.ReplaceAllString(s, "${1}"+redact.Redacted+"@")
+	s = userinfo.ReplaceAllString(s, "${1}"+redact.Redacted+"@")
+	return param.ReplaceAllStringFunc(s, func(m string) string {
+		sub := param.FindStringSubmatch(m)
+		name, err := url.QueryUnescape(sub[2])
+		if err != nil {
+			name = sub[2]
+		}
+		if !credName.MatchString(name) {
+			return m
+		}
+		return sub[1] + sub[2] + "=" + redact.Redacted
+	})
 }
 
 // ScrubMessage removes URL credentials from a Flux message, then redacts the
