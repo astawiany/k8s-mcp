@@ -38,7 +38,9 @@ type Client interface {
 	Get(ctx context.Context, r Resource, ns, name string) (map[string]any, error)
 	// Events lists core/v1 events in ns ("" = all), optionally only those
 	// about involved, and only those seen within since (0 = no bound), oldest
-	// first.
+	// first. At most 5000 events are returned: when there are more, the
+	// NEWEST are kept (by last-seen time). The live client reads at most 40
+	// pages of 500 events before applying this cap.
 	Events(ctx context.Context, ns string, involved *ObjectRef, since time.Duration) ([]map[string]any, error)
 	// PodLogs reads a container's log.
 	PodLogs(ctx context.Context, ns, pod string, o LogOptions) (string, error)
@@ -150,6 +152,8 @@ var (
 	ErrForbidden          = errors.New("forbidden by RBAC")
 	ErrUnauthorized       = errors.New("unauthorized: credentials rejected or expired")
 	ErrTimeout            = errors.New("API request timed out")
+	ErrUnreachable        = errors.New("cannot reach the API server (connection, DNS or TLS error)")
+	ErrCredentialPlugin   = errors.New("kubeconfig credential plugin (exec) failed")
 )
 
 // KindNotFoundError reports an unknown kind or resource name with up to five

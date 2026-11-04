@@ -268,3 +268,15 @@ func TestLiveMetrics(t *testing.T) {
 		t.Errorf("metrics endpoint 404: %v", err)
 	}
 }
+
+func TestLiveEventsCapKeepsNewest(t *testing.T) {
+	old := maxEvents
+	maxEvents = 1
+	t.Cleanup(func() { maxEvents = old })
+	c := newAPIStub(t, false).client(t)
+	// the stub lists "new" before "old"; both pass a zero since
+	ev, err := c.Events(bg, "default", nil, 0)
+	if err != nil || !slices.Equal(names(ev), []string{"default/new"}) {
+		t.Errorf("capped live events = %v, %v", names(ev), err)
+	}
+}

@@ -25,7 +25,19 @@ var forbiddenCalls = []string{
 	"Create", "Update", "UpdateStatus", "UpdateScale", "UpdateEphemeralContainers",
 	"UpdateResize", "Patch", "Apply", "ApplyStatus", "ApplyScale", "Delete",
 	"DeleteCollection", "Evict", "EvictV1", "EvictV1beta1", "Bind", "ProxyGet",
+	// raw REST paths: rest.Interface verbs and ways to obtain a raw client
+	"Post", "Put", "Verb", "RESTClient", "RESTClientFor", "UnversionedRESTClientFor",
+	"NewRESTClient", "HTTPClientFor",
 }
+
+// Imports allowed only in the named files (raw REST access stays in the live
+// client, where the call check above guards it).
+var importOnlyIn = map[string][]string{
+	"k8s.io/client-go/rest": {"live.go"},
+}
+
+// Imports no non-test file may use: a raw HTTP client could send any verb.
+var forbiddenImports = []string{"net/http"}
 
 // Only these Kubernetes packages may be imported: none of them is a write
 // helper on its own (typed core/v1 is needed for pod logs and is guarded by
@@ -97,6 +109,12 @@ func sourceViolations(t *testing.T, filename, src string) []string {
 	for _, imp := range f.Imports {
 		p, _ := strconv.Unquote(imp.Path.Value)
 		if strings.HasPrefix(p, "k8s.io/") && !slices.Contains(allowedK8sImports, p) {
+			bad = append(bad, "import "+p)
+		}
+		if files, ok := importOnlyIn[p]; ok && !slices.Contains(files, filepath.Base(filename)) {
+			bad = append(bad, "import "+p+" outside "+strings.Join(files, ","))
+		}
+		if slices.Contains(forbiddenImports, p) {
 			bad = append(bad, "import "+p)
 		}
 	}
@@ -192,5 +210,35 @@ func f(d dynamic.Interface, c *kubernetes.Clientset) {
 	want := []string{"import k8s.io/client-go/kubernetes", "call .Delete", "call .Create"}
 	if !slices.Equal(got, want) {
 		t.Errorf("source checker = %v, want %v", got, want)
+	}
+
+	// Raw REST bypasses: write verbs on rest.Interface and raw clients.
+	raw := `package kube
+import (
+	"net/http"
+	"k8s.io/client-go/rest"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+)
+func g(c corev1client.CoreV1Interface, cfg *rest.Config) {
+	c.RESTClient().Post().Resource("pods").Do(nil)
+	c.RESTClient().Verb("DELETE").Do(nil)
+	c.RESTClient().Put()
+	rest.RESTClientFor(cfg)
+	rest.HTTPClientFor(cfg)
+	http.Post("u", "", nil)
+}
+`
+	got = sourceViolations(t, "fake.go", raw)
+	want = []string{
+		"import net/http", "import k8s.io/client-go/rest outside live.go",
+		"call .Post", "call .RESTClient", "call .Verb", "call .RESTClient", "call .Put", "call .RESTClient",
+		"call .RESTClientFor", "call .HTTPClientFor", "call .Post",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("raw REST checker = %q\nwant %q", got, want)
+	}
+	// rest is fine in live.go itself (its calls are still checked).
+	if got := sourceViolations(t, "live.go", "package kube\nimport \"k8s.io/client-go/rest\"\nvar _ rest.Config\n"); len(got) != 0 {
+		t.Errorf("rest import in live.go flagged: %v", got)
 	}
 }

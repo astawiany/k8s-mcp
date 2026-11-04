@@ -34,8 +34,13 @@ func eventTime(ev map[string]any) time.Time {
 	return best
 }
 
+// maxEvents caps what Events returns; the newest events are kept. A variable
+// so tests can lower it.
+var maxEvents = 5000
+
 // sinceAndSort drops events older than since (0 = keep all; events without a
-// parseable time are kept) and sorts the rest oldest first.
+// parseable time are kept), keeps the newest maxEvents and returns them
+// oldest first.
 func sinceAndSort(items []map[string]any, since time.Duration, now time.Time) []map[string]any {
 	out := items[:0:0]
 	cutoff := now.Add(-since)
@@ -50,6 +55,9 @@ func sinceAndSort(items []map[string]any, since time.Duration, now time.Time) []
 	slices.SortStableFunc(out, func(a, b map[string]any) int {
 		return cmp.Or(eventTime(a).Compare(eventTime(b)), strings.Compare(objName(a), objName(b)))
 	})
+	if len(out) > maxEvents {
+		out = out[len(out)-maxEvents:]
+	}
 	return out
 }
 

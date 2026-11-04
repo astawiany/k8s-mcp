@@ -83,6 +83,15 @@ func (f *factory) For(name string) (Client, error) {
 		return nil, fmt.Errorf("context %q: kubeconfig entry is invalid or incomplete (inspect it with kubectl config view --minify --context %s)", name, name)
 	}
 	cfg.Timeout = f.timeout
+	if cfg.ExecProvider != nil {
+		// The MCP stdio pipe is the protocol channel: a credential plugin
+		// must never prompt on it or read it, whatever the kubeconfig says.
+		ep := *cfg.ExecProvider
+		ep.InteractiveMode = clientcmdapi.NeverExecInteractiveMode
+		ep.StdinUnavailable = true
+		ep.StdinUnavailableMessage = "k8s-mcp runs credential plugins non-interactively"
+		cfg.ExecProvider = &ep
+	}
 	c, err := newLiveClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("context %q: cannot build client", name)

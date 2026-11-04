@@ -425,3 +425,24 @@ func TestFakeFactory(t *testing.T) {
 		t.Errorf("SingleFakeFactory: %v %v", c, err)
 	}
 }
+
+func TestEventsCapKeepsNewest(t *testing.T) {
+	old := maxEvents
+	maxEvents = 2
+	t.Cleanup(func() { maxEvents = old })
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	// Names sort opposite to time, so a cap by key order would keep the oldest.
+	c := NewFakeClient(
+		Event("default", "a-newest", "Pod", "p", "Warning", "BackOff", "", now.Add(-time.Minute)),
+		Event("default", "b-newer", "Pod", "p", "Warning", "BackOff", "", now.Add(-2*time.Minute)),
+		Event("default", "c-old", "Pod", "p", "Warning", "BackOff", "", now.Add(-3*time.Minute)),
+		Event("default", "d-oldest", "Pod", "p", "Warning", "BackOff", "", now.Add(-4*time.Minute)),
+	).SetNow(now)
+	ev, err := c.Events(bg, "default", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(ev); !slices.Equal(got, []string{"default/b-newer", "default/a-newest"}) {
+		t.Errorf("capped events = %v, want the two newest, oldest first", got)
+	}
+}
