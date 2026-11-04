@@ -13,4 +13,5 @@ func RegisterAll(s *server.Server) {
 	registerGet(s)
 	registerDescribe(s)
 	registerEvents(s)
+	registerLogs(s)
 }
