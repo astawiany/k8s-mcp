@@ -325,8 +325,8 @@ func splitLog(raw string) []logLine {
 }
 
 var (
-	keyBegin = regexp.MustCompile(`(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`)
-	keyEnd   = regexp.MustCompile(`(?i)-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`)
+	keyBegin = redact.PrivateKeyBeginRE
+	keyEnd   = redact.PrivateKeyEndRE
 	b64Line  = regexp.MustCompile(`^[A-Za-z0-9+/=]+$`)
 )
 

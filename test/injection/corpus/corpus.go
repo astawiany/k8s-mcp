@@ -48,6 +48,9 @@ const (
 	manifestCanary  = "k8smcp-canary-manifest-91b2"
 	yamlCanary      = "k8smcp-canary-yaml-4e7d"
 	pemCanary       = "K8SMCPCANARYPEMBODY0c1d2e3f4a5b6c7d8e9f"
+	pgpCanary       = "K8SMCPCANARYPGPBODY7a6b5c4d3e2f1a0b"
+	pem4Canary      = "K8SMCPCANARYPEM4DASH1b2c3d4e5f6a7b8c"
+	pemTabCanary    = "K8SMCPCANARYPEMTAB9e8d7c6b5a4f3e2d"
 	githubCanary    = "ghp_K8sMcpCanaryGithubToken000000000001"
 	awsCanary       = "AKIAK8SMCPCANARY0001"
 	jwtCanary       = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJrOHNtY3AtY2FuYXJ5In0.K8sMcpCanaryJwtSignature01"
@@ -107,6 +110,12 @@ func Payloads() []Payload {
 				"\nstringData:\n  token: " + yamlCanary + "\n"},
 		{Name: "pem-private-key", Masked: true, Canaries: []string{pemCanary},
 			Text: "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + pemCanary + "\nZm9vYmFyYmF6cXV4\n-----END RSA PRIVATE KEY-----"},
+		{Name: "pem-pgp", Masked: true, Canaries: []string{pgpCanary},
+			Text: "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF" + pgpCanary + "\n=abcd\n-----END PGP PRIVATE KEY BLOCK-----"},
+		{Name: "pem-4dash", Masked: true, Canaries: []string{pem4Canary},
+			Text: "----BEGIN RSA PRIVATE KEY----\nMIIEpAIBAAKCAQEA" + pem4Canary + "\n----END RSA PRIVATE KEY----"},
+		{Name: "pem-tab", Masked: true, Canaries: []string{pemTabCanary},
+			Text: "-----BEGIN\tEC  PRIVATE KEY-----\nMHcCAQEEI" + pemTabCanary + "\n-----END\tEC  PRIVATE KEY-----"},
 		{Name: "token-github", Masked: true, Canaries: []string{githubCanary}, Text: "export GITHUB_TOKEN=" + githubCanary},
 		{Name: "token-aws", Masked: true, Canaries: []string{awsCanary}, Text: "aws key id " + awsCanary + " in use"},
 		{Name: "token-jwt", Masked: true, Canaries: []string{jwtCanary}, Text: "Authorization: Bearer " + jwtCanary},

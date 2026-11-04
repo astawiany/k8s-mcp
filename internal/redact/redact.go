@@ -69,6 +69,13 @@
 //	                            every element of items (lists). Use it for any
 //	                            object returned to a client.
 //
+//	MaskPrivateKeyBlocks(s)     s with every private key block (BEGIN
+//	                            through END, or to the end; RSA, EC, DSA,
+//	                            OPENSSH, ENCRYPTED, PGP ... BLOCK; 4 or 5
+//	                            dashes; any case) replaced by Redacted.
+//	                            PrivateKeyBeginRE/EndRE/BlockRE are the
+//	                            shared patterns (logs use them per line).
+//
 //	LooksLikeSecretManifest(s)  true when s, JSON-unescaped at any depth,
 //	                            ignoring case and with control, format and
 //	                            ANSI characters removed, contains "secret",
@@ -195,11 +202,12 @@ var (
 		regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`),                              // GitHub
 		regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),                            // GitHub fine-grained
 		regexp.MustCompile(`(AKIA|ASIA)[0-9A-Z]{16}`),                                 // AWS key id
-		regexp.MustCompile(`(?i)-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----`),                // PEM
-		regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@`),           // URL credentials (user may be empty)
-		regexp.MustCompile(`xox[abprs]-[A-Za-z0-9-]{10,}`),                            // Slack
-		regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`),                                   // Google API key
-		regexp.MustCompile(`[sr]k_live_[0-9A-Za-z]{10,}`),                             // Stripe live key
+		PrivateKeyBeginRE, // PEM/PGP private key (privatekey.go)
+		PrivateKeyEndRE,
+		regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@`), // URL credentials (user may be empty)
+		regexp.MustCompile(`xox[abprs]-[A-Za-z0-9-]{10,}`),                  // Slack
+		regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`),                         // Google API key
+		regexp.MustCompile(`[sr]k_live_[0-9A-Za-z]{10,}`),                   // Stripe live key
 	}
 	// credHeader lists HTTP header names whose values are always masked, in
 	// addition to names matching credName.

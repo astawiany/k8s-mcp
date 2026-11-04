@@ -120,13 +120,10 @@ func maskLine(l string) string {
 	return redact.EnvValue("", l)
 }
 
-// pemBlockRe matches a private key block from its BEGIN line through its END
-// line, or to the end of the text when there is no END (fail closed). Per-line
-// masking alone would hide only the BEGIN line and keep the key body.
-var pemBlockRe = regexp.MustCompile(`(?is)-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----.*?(-----END[A-Z0-9 ]*PRIVATE KEY-----|\z)`)
-
+// maskLines masks whole private key blocks first (per-line masking alone
+// would hide only the BEGIN line and keep the key body), then every line.
 func maskLines(s string) string {
-	s = pemBlockRe.ReplaceAllLiteralString(s, redact.Redacted)
+	s, _ = redact.MaskPrivateKeyBlocks(s)
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
 		lines[i] = maskLine(l)
