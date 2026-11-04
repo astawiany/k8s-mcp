@@ -11,8 +11,10 @@
 // The wrapper, in order, for a successful call:
 //
 //  1. encode the handler's Go value to JSON and decode it to a generic tree;
-//  2. for every string, map keys included: replace it with redact.Redacted
-//     if it holds a token shape (redact.EnvValue), cut it only if it is
+//  2. for every string, map keys included: replace it whole with
+//     redact.RedactedSecretManifest if redact.LooksLikeSecretManifest (fail
+//     closed, on the raw uncut text), with redact.Redacted if it holds a
+//     token shape (redact.EnvValue), cut it only if it is
 //     larger than 4 MiB (a guard; Sanitize is linear), untrusted.Sanitize
 //     it, and check the token shapes again on the sanitised, uncut text;
 //  3. backstop, first pass: redact.Object over the whole tree, which reduces
@@ -21,8 +23,9 @@
 //     invisible characters cannot hide a kind, a key or break an
 //     annotation's JSON) and before any per-string cut (an embedded Secret
 //     is only found while its JSON parses);
-//  4. cap every string and key with limits.TruncateText(Default) and check
-//     the token shapes again;
+//  4. Sanitize every string and key again (step 3 may re-encode embedded
+//     JSON, turning escaped invisible characters into raw ones), cap it with
+//     limits.TruncateText(Default) and check the token shapes again;
 //  5. backstop, second pass, on the final strings;
 //  6. encode the tree as compact JSON and cut the document so that the
 //     escaped body plus the envelope fits MaxBytes, with a limits.Note;

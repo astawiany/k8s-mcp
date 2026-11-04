@@ -616,3 +616,59 @@ func TestHiddenTokenSplitByCutIsStillRedacted(t *testing.T) {
 		t.Errorf("token prefix %q leaked", prefix)
 	}
 }
+
+func TestSecretManifestFailClosed(t *testing.T) {
+	const leak = "PLANTEDPW77"
+	js := `{"apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"},"pad":"` + strings.Repeat("x", 10) + `"}`
+	cm := func(v string) map[string]any {
+		return map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": "cm", "annotations": map[string]any{"a/b": v}}}
+	}
+	big := strings.Repeat("y", 5<<20)
+	cases := map[string]any{
+		"ESC prefix":                 cm("\x1b" + js),
+		"ESC [ prefix":               cm("\x1b[" + js),
+		"OSC prefix":                 cm("\x1b]0;" + js),
+		"C1 CSI prefix":              cm("\u009b" + js),
+		"escaped invisible in kind":  cm(`{"apiVersion":"v1","kind":"Sec\u200bret","data":{"password":"` + leak + `"}}`),
+		"escaped invisible in key":   cm(`{"apiVersion":"v1","ki\u200bnd":"Secret","data":{"password":"` + leak + `"}}`),
+		"5 MiB pad after the Secret": cm(`{"apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"},"pad":"` + big + `"}`),
+		"5 MiB pad before":           cm(`{"pad":"` + big + `","apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"}}`),
+		"manifest in a log line":     map[string]any{"log": "applying " + js + "\nERROR done"},
+		"YAML in ConfigMap data":     map[string]any{"kind": "ConfigMap", "data": map[string]any{"s.yaml": "apiVersion: v1\nkind: Secret\ndata:\n  password: " + leak + "\n"}},
+	}
+	for name, v := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := payload(t, v)
+			if strings.Contains(body, leak) {
+				t.Errorf("planted Secret value leaked")
+			}
+			assertClean(t, body)
+		})
+	}
+}
+
+func TestSecretManifestNoFalsePositives(t *testing.T) {
+	for name, v := range map[string]string{
+		"annotation": "this secret is rotated daily",
+		"log":        "2026-11-04T10:00:00Z ran kubectl get secret db -o yaml",
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := payload(t, map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
+				"annotations": map[string]any{"a/b": v}}})
+			if !strings.Contains(body, v) {
+				t.Errorf("normal text changed: %s", body)
+			}
+		})
+	}
+}
+
+func TestRewrittenAnnotationJSONIsSanitized(t *testing.T) {
+	// redact re-encodes an embedded JSON annotation when it changes it
+	// (here: managedFields removed); JSON-escaped invisibles then come out
+	// as raw characters, after the first Sanitize pass.
+	ann := `{"metadata":{"name":"x","managedFields":[{"m":1}]},"note":"a\u200bb\u202ec"}`
+	body := payload(t, map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
+		"annotations": map[string]any{"a/b": ann}}})
+	assertClean(t, body)
+}

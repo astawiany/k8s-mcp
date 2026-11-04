@@ -69,6 +69,21 @@
 //	                            every element of items (lists). Use it for any
 //	                            object returned to a client.
 //
+//	LooksLikeSecretManifest(s)  true when s, ignoring case and with control
+//	                            and format characters removed (raw or as JSON
+//	                            \uXXXX escapes), contains "secret", "kind" and
+//	                            one of "\"data\"", "data:", "stringdata".
+//	                            Broad on purpose: callers replace the whole
+//	                            string with RedactedSecretManifest.
+//
+// Annotation values (any key) that are not a parseable JSON object or array
+// but LooksLikeSecretManifest are replaced whole by RedactedSecretManifest
+// (fail closed: a cut, prefixed or YAML Secret cannot be scrubbed field by
+// field). Field names and kind values are compared with control and format
+// characters removed ("ki\u200bnd": "Sec\u200bret" is a Secret), but only
+// where a match makes the scrub stricter: the Secret fields that are kept
+// (apiVersion, kind, metadata, type, immutable) must match exactly.
+//
 // A Secret's metadata keeps name, namespace, labels, ownerReferences,
 // timestamps, resourceVersion and uid, but every annotation value becomes
 // Redacted (keys kept).
@@ -84,7 +99,11 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // Redacted replaces every hidden value.
@@ -210,7 +229,7 @@ var secretKeep = map[string]bool{
 func scrubTree(v any, asSecret bool) {
 	switch t := v.(type) {
 	case map[string]any:
-		kind := strings.ToLower(strings.TrimSpace(fmt.Sprint(lookup(t, "kind"))))
+		kind := normKey(fmt.Sprint(lookup(t, "kind")))
 		if asSecret || kind == "secret" {
 			for k, val := range t {
 				if !secretKeep[strings.ToLower(k)] {
@@ -219,7 +238,7 @@ func scrubTree(v any, asSecret bool) {
 				}
 				if md, ok := val.(map[string]any); ok && strings.EqualFold(k, "metadata") {
 					for mk, mv := range md {
-						if strings.EqualFold(mk, "annotations") {
+						if normKey(mk) == "annotations" {
 							md[mk] = redactValue(mv)
 						}
 					}
@@ -227,7 +246,7 @@ func scrubTree(v any, asSecret bool) {
 			}
 		}
 		for k, val := range t {
-			switch strings.ToLower(k) {
+			switch normKey(k) {
 			case "metadata":
 				if md, ok := val.(map[string]any); ok {
 					scrubMetadata(md)
@@ -265,12 +284,12 @@ func redactValue(v any) any {
 
 func scrubMetadata(md map[string]any) {
 	for k := range md {
-		if strings.EqualFold(k, "managedFields") {
+		if normKey(k) == "managedfields" {
 			delete(md, k)
 		}
 	}
 	for k, val := range md {
-		if !strings.EqualFold(k, "annotations") {
+		if normKey(k) != "annotations" {
 			continue
 		}
 		ann, ok := val.(map[string]any)
@@ -278,7 +297,7 @@ func scrubMetadata(md map[string]any) {
 			continue
 		}
 		for ak, av := range ann {
-			if strings.EqualFold(ak, lastAppliedAnnotation) {
+			if normKey(ak) == lastAppliedAnnotation {
 				ann[ak] = scrubJSONString(av, true)
 			} else {
 				ann[ak] = scrubJSONString(av, false)
@@ -303,14 +322,14 @@ func scrubJSONString(v any, strict bool) any {
 		if strict && trimmed != "" {
 			return Redacted
 		}
-		return v
+		return unparsable(s)
 	}
 	var parsed any
 	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
 		if strict {
 			return Redacted
 		}
-		return v
+		return unparsable(s)
 	}
 	orig := deepCopy(parsed)
 	scrubTree(parsed, false)
@@ -366,7 +385,7 @@ func maskWorkload(m map[string]any) {
 
 func maskPodSpec(spec map[string]any) {
 	for k, cs := range spec {
-		switch strings.ToLower(k) {
+		switch normKey(k) {
 		case "containers", "initcontainers", "ephemeralcontainers":
 		default:
 			continue
@@ -408,7 +427,7 @@ func maskContainer(c map[string]any) {
 		}
 	}
 	for k, v := range c {
-		switch strings.ToLower(k) {
+		switch normKey(k) {
 		case "command", "args":
 			if l, ok := v.([]any); ok {
 				maskArgs(l)
@@ -435,7 +454,7 @@ func maskNameValues(list []any, mask func(name, value string) string) {
 		}
 		name := fmt.Sprint(lookup(em, "name"))
 		for ek, ev := range em {
-			if !strings.EqualFold(ek, "value") || ev == nil {
+			if normKey(ek) != "value" || ev == nil {
 				continue
 			}
 			sv, isStr := ev.(string)
@@ -489,7 +508,7 @@ func lookup(m map[string]any, key string) any {
 		return v
 	}
 	for k, v := range m {
-		if strings.EqualFold(k, key) {
+		if normKey(k) == strings.ToLower(key) {
 			return v
 		}
 	}
@@ -532,4 +551,98 @@ func deepCopy(v any) any {
 		return out
 	}
 	return v
+}
+
+// RedactedSecretManifest replaces, whole, a string that looks like a Secret
+// manifest but cannot be scrubbed field by field.
+const RedactedSecretManifest = "[redacted: embedded Secret manifest]"
+
+// unparsable handles an annotation value that is not a JSON object or
+// array: fail closed if it looks like a Secret manifest, else keep it.
+func unparsable(s string) any {
+	if LooksLikeSecretManifest(s) {
+		return RedactedSecretManifest
+	}
+	return s
+}
+
+// LooksLikeSecretManifest reports whether s may hold a Secret manifest (JSON
+// or YAML, whole or cut): after removing control and format (Cf) characters,
+// raw or written as JSON \uXXXX escapes (surrogate pairs included), and
+// ignoring case, s contains "secret", "kind", and one of "\"data\"",
+// "data:" or "stringdata". It is deliberately broad (fail closed): callers
+// replace such a string whole. Time is linear in len(s).
+func LooksLikeSecretManifest(s string) bool {
+	n := normManifest(s)
+	return strings.Contains(n, "secret") && strings.Contains(n, "kind") &&
+		(strings.Contains(n, `"data"`) || strings.Contains(n, "data:") || strings.Contains(n, "stringdata"))
+}
+
+// invisibleRune reports control and format characters, which can hide or
+// split a word without being seen.
+func invisibleRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
+}
+
+// normKey normalises a field name or kind value for comparison: control and
+// format characters removed, spaces trimmed, lower case. Used only where a
+// match makes the scrub stricter, never to keep a field.
+func normKey(s string) string {
+	if strings.IndexFunc(s, invisibleRune) >= 0 {
+		s = strings.Map(func(r rune) rune {
+			if invisibleRune(r) {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// normManifest lower-cases s and drops invisible runes, raw or as JSON
+// \uXXXX escapes.
+func normManifest(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\\' {
+			if r, w := jsonEscape(s[i:]); w > 0 {
+				if !invisibleRune(r) {
+					b.WriteString(strings.ToLower(s[i : i+w]))
+				}
+				i += w
+				continue
+			}
+		}
+		r, w := utf8.DecodeRuneInString(s[i:])
+		if !invisibleRune(r) {
+			b.WriteRune(unicode.ToLower(r))
+		}
+		i += w
+	}
+	return b.String()
+}
+
+// jsonEscape decodes a \uXXXX escape (or a surrogate pair of them) at the
+// start of s, returning the rune and the bytes used, or w == 0.
+func jsonEscape(s string) (r rune, w int) {
+	hex4 := func(t string) (rune, bool) {
+		if len(t) < 6 || t[0] != '\\' || t[1] != 'u' {
+			return 0, false
+		}
+		v, err := strconv.ParseUint(t[2:6], 16, 32)
+		return rune(v), err == nil
+	}
+	r1, ok := hex4(s)
+	if !ok {
+		return 0, 0
+	}
+	if utf16.IsSurrogate(r1) {
+		if r2, ok := hex4(s[6:]); ok {
+			if d := utf16.DecodeRune(r1, r2); d != utf8.RuneError {
+				return d, 12
+			}
+		}
+	}
+	return r1, 6
 }

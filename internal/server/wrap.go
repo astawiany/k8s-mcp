@@ -130,14 +130,21 @@ func mapTree(v any, f func(string) string) any {
 	return v // json.Number, bool, nil
 }
 
-// sanitizeString is the first string pass: token-shape redaction of the raw
-// string, a guard cut at preCut, untrusted.Sanitize, and token-shape
+// sanitizeString is the first string pass: Secret-manifest check
+// (redact.LooksLikeSecretManifest, whole string replaced), token-shape
+// redaction of the raw string, a guard cut at preCut, untrusted.Sanitize, and token-shape
 // redaction again (tokens hidden by invisible characters only match after
 // Sanitize). Both token checks see the whole string, before the per-string
 // cap, so a token split by a later cut still hides the value.
 func sanitizeString(str string) string {
 	if str == "" {
 		return str
+	}
+	// Fail closed, on the whole raw string (before the guard cut and before
+	// Sanitize, which can eat a JSON "{" as the final byte of a CSI
+	// sequence): a string that may hold a Secret manifest is replaced whole.
+	if redact.LooksLikeSecretManifest(str) {
+		return redact.RedactedSecretManifest
 	}
 	if redact.EnvValue("", str) == redact.Redacted {
 		return redact.Redacted
@@ -148,10 +155,12 @@ func sanitizeString(str string) string {
 	return redact.EnvValue("", untrusted.Sanitize(str))
 }
 
-// capString is the second string pass: the per-string limits
-// (limits.Default: line length, lines, bytes) and a final token check.
+// capString is the second string pass: Sanitize again (backstop pass 1 may
+// re-encode an embedded JSON annotation, turning JSON-escaped invisible
+// characters into raw ones), the per-string limits (limits.Default: line
+// length, lines, bytes) and a final token check.
 func capString(str string) string {
-	str, _ = limits.TruncateText(str, lim)
+	str, _ = limits.TruncateText(untrusted.Sanitize(str), lim)
 	return redact.EnvValue("", str)
 }
 

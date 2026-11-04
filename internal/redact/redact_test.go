@@ -510,3 +510,91 @@ func TestObjectSecretMetadata(t *testing.T) {
 	list := Object(obj(t, `{"kind":"SecretList","items":[{"metadata":{"name":"a","annotations":{"n":"ANNLEAK"}}}]}`))
 	assertAbsent(t, list, "ANNLEAK")
 }
+
+func TestLooksLikeSecretManifest(t *testing.T) {
+	yes := []string{
+		`{"apiVersion":"v1","kind":"Secret","data":{"password":"x"}}`,
+		"apiVersion: v1\nkind: Secret\ndata:\n  password: eA==\n",
+		"apiVersion: v1\nKIND: SECRET\nstringData:\n  password: x\n",
+		`{"kind":"Sec\u200bret","data":{"p":"x"}}`,               // JSON-escaped zero-width in the value
+		`{"ki\u200bnd":"Secret","data":{"p":"x"}}`,               // ... in the key
+		`{"kind":"Secret","da\u2060ta":{"p":"x"}}`,               // ... in "data"
+		`{"kind":"Sec\udb40\udc41ret","data":{"p":"x"}}`,         // tag character as a surrogate pair
+		"\x1b{\"kind\":\"Se\u200bcret\",\"data\":{\"p\":\"x\"}}", // raw invisibles
+		"\u009b{\"kind\":\"Secret\",\"data\":{}}",
+	}
+	no := []string{
+		"",
+		"this secret is rotated daily",
+		"kubectl get secret db -o yaml",
+		`{"kind":"ConfigMap","data":{"a":"b"}}`,
+		"kind: Secret mentioned without any payload",
+		`{"kind":"Secret","metadata":{"name":"s"}}`,
+	}
+	for _, s := range yes {
+		if !LooksLikeSecretManifest(s) {
+			t.Errorf("LooksLikeSecretManifest(%q) = false, want true", s)
+		}
+	}
+	for _, s := range no {
+		if LooksLikeSecretManifest(s) {
+			t.Errorf("LooksLikeSecretManifest(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestObjectUnparsableAnnotationWithSecretManifestRedacted(t *testing.T) {
+	const leak = "LEAKEDPW42"
+	js := `{"apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"}}`
+	for name, v := range map[string]string{
+		"ESC brace":    "\x1b" + js[1:],
+		"cut":          js[:len(js)-3],
+		"YAML":         "kind: Secret\ndata:\n  password: " + leak + "\n",
+		"prefix text":  "applied: " + js,
+		"C1 CSI eaten": "\u009b" + js[1:],
+	} {
+		t.Run(name, func(t *testing.T) {
+			obj := map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
+				"annotations": map[string]any{"a/b": v}}}
+			got := Object(obj)
+			ann := got["metadata"].(map[string]any)["annotations"].(map[string]any)["a/b"]
+			if ann != RedactedSecretManifest {
+				t.Errorf("annotation = %q, want %q", ann, RedactedSecretManifest)
+			}
+		})
+	}
+}
+
+func TestObjectAnnotationPlainTextUntouched(t *testing.T) {
+	obj := map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
+		"annotations": map[string]any{"a/b": "this secret is rotated daily", "c/d": "kubectl get secret x"}}}
+	ann := Object(obj)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	if ann["a/b"] != "this secret is rotated daily" || ann["c/d"] != "kubectl get secret x" {
+		t.Errorf("plain annotations changed: %v", ann)
+	}
+}
+
+func TestObjectEmbeddedSecretWithEscapedInvisibles(t *testing.T) {
+	const leak = "LEAKEDPW43"
+	for name, js := range map[string]string{
+		"kind value": `{"apiVersion":"v1","kind":"Sec\u200bret","data":{"password":"` + leak + `"}}`,
+		"kind key":   `{"apiVersion":"v1","ki\u200bnd":"Secret","data":{"password":"` + leak + `"}}`,
+		"both, tag":  `{"apiVersion":"v1","k\udb40\udc41ind":"SEC\u202eRET","stringData":{"password":"` + leak + `"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			obj := map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
+				"annotations": map[string]any{"a/b": js}}}
+			if b, _ := json.Marshal(Object(obj)); strings.Contains(string(b), leak) {
+				t.Errorf("leaked: %s", b)
+			}
+		})
+	}
+}
+
+func TestObjectSecretKindWithRawInvisibles(t *testing.T) {
+	const leak = "LEAKEDPW44"
+	obj := map[string]any{"ki\u200bnd": "Sec\u200bret", "data": map[string]any{"p": leak}}
+	if b, _ := json.Marshal(Object(obj)); strings.Contains(string(b), leak) {
+		t.Errorf("leaked: %s", b)
+	}
+}
