@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -123,7 +124,7 @@ func workloadHealth(ctx context.Context, f kube.Factory, in healthIn) (any, erro
 	out.Truncated = pl.Continue != ""
 
 	pods := pl.Items
-	var ignored int
+	var ignored, unattributed int
 	if kind == "Deployment" {
 		rr, err := c.Resolve(ctx, "ReplicaSet", "apps", "")
 		if err != nil {
@@ -133,7 +134,7 @@ func workloadHealth(ctx context.Context, f kube.Factory, in healthIn) (any, erro
 		if err != nil {
 			return nil, err
 		}
-		pods, ignored = filterDeploymentPods(pods, rl.Items, name)
+		pods, ignored, unattributed = filterDeploymentPods(pods, rl.Items, name)
 	} else {
 		pods, ignored = filterOwned(pods, kind, name)
 	}
@@ -169,7 +170,10 @@ func workloadHealth(ctx context.Context, f kube.Factory, in healthIn) (any, erro
 		notes = append(notes, fmt.Sprintf("pods capped at %d (list read at most %d); unhealthy pods are listed first", maxHealthPods, max))
 	}
 	if ignored > 0 {
-		notes = append(notes, fmt.Sprintf("%d pod(s) ignored: owned by another controller or by a scaled-down old ReplicaSet", ignored))
+		notes = append(notes, fmt.Sprintf("%d pod(s) ignored: not controlled by this workload, or from a scaled-down old ReplicaSet", ignored))
+	}
+	if unattributed > 0 {
+		notes = append(notes, fmt.Sprintf("%d pod(s) could not be attributed (their ReplicaSet was not found) and are included", unattributed))
 	}
 	out.Note = strings.Join(notes, "; ")
 	return out, nil
@@ -252,25 +256,35 @@ func filterOwned(pods []map[string]any, kind, name string) (keep []map[string]an
 // Deployment and has spec.replicas > 0 (old revisions scaled to zero only
 // leave terminating leftovers). Pods with no controller owner are kept; a pod
 // owned by anything else is dropped.
-func filterDeploymentPods(pods, rss []map[string]any, name string) (keep []map[string]any, ignored int) {
-	live := map[string]bool{}
+func filterDeploymentPods(pods, rss []map[string]any, name string) (keep []map[string]any, ignored, unattributed int) {
+	live, known := map[string]bool{}, map[string]bool{}
 	for _, rs := range rss {
+		rn := str(rs, "metadata", "name")
+		known[rn] = true
 		if k, n, ok := controllerOwner(rs); !ok || k != "Deployment" || n != name {
 			continue
 		}
 		if replicas, ok := toInt(nested(rs, "spec", "replicas")); ok && replicas == 0 {
 			continue
 		}
-		live[str(rs, "metadata", "name")] = true
+		live[rn] = true
 	}
 	for _, p := range pods {
-		if k, n, ok := controllerOwner(p); ok && (k != "ReplicaSet" || !live[n]) {
+		k, n, ok := controllerOwner(p)
+		switch {
+		case !ok:
+		case k != "ReplicaSet":
+			ignored++
+			continue
+		case !known[n]:
+			unattributed++ // ReplicaSet not in the list: keep what cannot be attributed
+		case !live[n]:
 			ignored++
 			continue
 		}
 		keep = append(keep, p)
 	}
-	return keep, ignored
+	return keep, ignored, unattributed
 }
 
 func toInt(v any) (int64, bool) {
@@ -364,7 +378,26 @@ func memoryLimit(p map[string]any, container string) string {
 	return ""
 }
 
+// failingWaiting are the waiting reasons that mark a container as the failing
+// one when choosing what the pod summary shows.
+var failingWaiting = map[string]bool{"CrashLoopBackOff": true, "ImagePullBackOff": true, "ErrImagePull": true,
+	"CreateContainerConfigError": true, "RunContainerError": true, "CreateContainerError": true, "InvalidImageName": true}
+
+const (
+	stuckInitAfter = 5 * time.Minute
+	terminatingFor = 5 * time.Minute
+)
+
+func tsAge(ts string, now time.Time) (time.Duration, bool) {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return 0, false
+	}
+	return now.Sub(t), true
+}
+
 func analyzePod(p map[string]any) podInfo {
+	now := time.Now()
 	name := str(p, "metadata", "name")
 	hp := healthPod{Name: name, Phase: str(p, "status", "phase")}
 	ref := func(s string) string { return "pod/" + name + "/" + s }
@@ -374,56 +407,97 @@ func analyzePod(p map[string]any) podInfo {
 	if c := podCondition(p, "Ready"); c != nil && c["status"] == "True" {
 		hp.Ready = true
 	}
-	var statuses []any
+	type cstat struct {
+		m    map[string]any
+		init bool
+	}
+	var statuses []cstat
 	for _, key := range []string{"initContainerStatuses", "containerStatuses"} {
 		l, _ := nested(p, "status", key).([]any)
-		statuses = append(statuses, l...)
+		for _, s := range l {
+			if m, _ := s.(map[string]any); m != nil {
+				statuses = append(statuses, cstat{m, key == "initContainerStatuses"})
+			}
+		}
 	}
-	var notReadyRunning bool
-	for _, s := range statuses {
-		cs, _ := s.(map[string]any)
+	var notReadyRunning, picked bool
+	var firstWaiting string
+	for _, st := range statuses {
+		cs := st.m
 		cname, _ := cs["name"].(string)
+		label := cname
+		prefix := ""
+		if st.init {
+			label = "init:" + cname
+			prefix = "Init:"
+		}
 		restarts := intAt(cs, "restartCount")
 		hp.Restarts += restarts
 		wait, _ := nested(cs, "state", "waiting").(map[string]any)
 		reason, _ := wait["reason"].(string)
 		msg := clean(fmt.Sprint(orEmpty(wait["message"])))
-		last, _ := nested(cs, "lastState", "terminated").(map[string]any)
+		// The termination to report: the current terminated state, else the last one.
+		curTerm, _ := nested(cs, "state", "terminated").(map[string]any)
+		src, evid := curTerm, "lastState"
+		if src == nil {
+			src, _ = nested(cs, "lastState", "terminated").(map[string]any)
+		}
 		var term *healthTermination
-		if last != nil {
-			term = &healthTermination{Reason: clean(fmt.Sprint(orEmpty(last["reason"]))), ExitCode: intAt(last, "exitCode"),
-				FinishedAt: fmt.Sprint(orEmpty(last["finishedAt"]))}
-			if hp.LastTermination == nil {
-				hp.LastTermination = term
+		if src != nil {
+			term = &healthTermination{Reason: clean(fmt.Sprint(orEmpty(src["reason"]))), ExitCode: intAt(src, "exitCode"),
+				FinishedAt: fmt.Sprint(orEmpty(src["finishedAt"]))}
+		}
+		failing := failingWaiting[reason] || (term != nil && term.ExitCode != 0)
+		if failing && !picked {
+			picked = true
+			hp.LastTermination = term
+			if reason != "" {
+				hp.WaitingReason = prefix + reason
 			}
 		}
-		if reason != "" && hp.WaitingReason == "" && reason != "ContainerCreating" && reason != "PodInitializing" {
-			hp.WaitingReason = reason
+		if reason != "" && firstWaiting == "" && reason != "ContainerCreating" && reason != "PodInitializing" {
+			firstWaiting = prefix + reason
 		}
 		switch {
 		case reason == "CrashLoopBackOff":
 			exit := "unknown"
-			evid := "status"
+			e := "status"
 			if term != nil {
 				exit = fmt.Sprintf("%d (%s)", term.ExitCode, term.Reason)
-				evid = "lastState"
+				e = "lastState"
 			}
-			add("critical", fmt.Sprintf("pod %s container %s is in CrashLoopBackOff: %d restarts, last exit code %s", name, cname, restarts, exit), evid)
+			add("critical", fmt.Sprintf("pod %s container %s is in CrashLoopBackOff: %d restarts, last exit code %s", name, label, restarts, exit), e)
 		case reason == "ImagePullBackOff" || reason == "ErrImagePull":
-			add("critical", fmt.Sprintf("pod %s container %s cannot pull image %q (%s): %s", name, cname, str(cs, "image"), reason, msg), "status")
+			add("critical", fmt.Sprintf("pod %s container %s cannot pull image %q (%s): %s", name, label, clean(str(cs, "image")), reason, msg), "status")
 		case configErrors[reason]:
-			add("critical", fmt.Sprintf("pod %s container %s: %s: %s", name, cname, reason, msg), "status")
+			add("critical", fmt.Sprintf("pod %s container %s: %s: %s", name, label, reason, msg), "status")
 		}
-		if term != nil && (term.Reason == "OOMKilled") {
+		if term != nil && term.Reason == "OOMKilled" {
 			lim := "no memory limit set"
 			if l := memoryLimit(p, cname); l != "" {
 				lim = "memory limit " + l
 			}
-			add("critical", fmt.Sprintf("pod %s container %s was OOMKilled (exit code %d), %s, %d restarts", name, cname, term.ExitCode, lim, restarts), "lastState")
+			add("critical", fmt.Sprintf("pod %s container %s was OOMKilled (exit code %d), %s, %d restarts", name, label, term.ExitCode, lim, restarts), evid)
+		} else if curTerm != nil && term.ExitCode != 0 {
+			add("critical", fmt.Sprintf("pod %s container %s terminated with exit code %d (%s)", name, label, term.ExitCode, term.Reason), evid)
 		}
-		if run, _ := nested(cs, "state", "running").(map[string]any); run != nil && cs["ready"] == false && restarts == 0 {
-			notReadyRunning = true
+		if run, _ := nested(cs, "state", "running").(map[string]any); run != nil {
+			if cs["ready"] == false && restarts == 0 && !st.init {
+				notReadyRunning = true
+			}
+			if st.init {
+				started, _ := run["startedAt"].(string)
+				if started == "" {
+					started = str(p, "metadata", "creationTimestamp")
+				}
+				if d, ok := tsAge(started, now); ok && d >= stuckInitAfter {
+					add("warning", fmt.Sprintf("pod %s init container %s still running after %d minutes", name, cname, int(d.Minutes())), "status")
+				}
+			}
 		}
+	}
+	if hp.WaitingReason == "" {
+		hp.WaitingReason = firstWaiting
 	}
 	for _, c := range podConditions(p) {
 		if c["type"] == "PodScheduled" && c["status"] == "False" && c["reason"] == "Unschedulable" {
@@ -431,8 +505,18 @@ func analyzePod(p map[string]any) podInfo {
 			add("warning", fmt.Sprintf("pod %s is Pending and unschedulable: %s", name, hp.UnschedulableMessage), "conditions")
 		}
 	}
-	if hp.Phase == "Failed" && str(p, "status", "reason") == "Evicted" {
-		add("warning", fmt.Sprintf("pod %s was Evicted: %s", name, clean(str(p, "status", "message"))), "status")
+	if hp.Phase == "Failed" {
+		reason := clean(str(p, "status", "reason"))
+		msg := clean(str(p, "status", "message"))
+		switch {
+		case reason == "Evicted":
+			add("warning", fmt.Sprintf("pod %s was Evicted: %s", name, msg), "status")
+		case reason != "":
+			add("warning", fmt.Sprintf("pod %s failed: %s: %s", name, reason, msg), "status")
+		}
+	}
+	if d, ok := tsAge(str(p, "metadata", "deletionTimestamp"), now); ok && d >= terminatingFor {
+		add("warning", fmt.Sprintf("pod %s is stuck Terminating for %d minutes", name, int(d.Minutes())), "status")
 	}
 	if hp.Phase == "Running" && !hp.Ready && notReadyRunning && hp.WaitingReason == "" {
 		add("warning", fmt.Sprintf("pod %s is Running but not Ready: readiness is failing (0 restarts)", name), "conditions")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/astawiany/k8s-mcp/internal/kube"
 	"github.com/astawiany/k8s-mcp/internal/server/servertest"
@@ -226,8 +227,10 @@ func TestWorkloadHealthMatchExpressionsSelector(t *testing.T) {
 
 func TestWorkloadHealthStaleAndForeignPods(t *testing.T) {
 	foreign := hPod("foreign", "other-rs", "Running", true, nil, nil)
+	otherRS := hRS("other-rs", 1)
+	otherRS["metadata"].(map[string]any)["ownerReferences"] = []any{map[string]any{"kind": "Deployment", "name": "other", "controller": true}}
 	bare := hPod("bare", "", "Running", true, nil, nil)
-	out := health(t, hDeploy(1, 1), hRS("web-1", 0), hRS("web-2", 1),
+	out := health(t, hDeploy(1, 1), hRS("web-1", 0), hRS("web-2", 1), otherRS,
 		hPod("old", "web-1", "Running", false, nil, nil), hPod("new", "web-2", "Running", true, nil, nil), foreign, bare)
 	var names []string
 	for _, p := range out.Pods {
@@ -285,5 +288,106 @@ func TestWorkloadHealthNotFoundIsTyped(t *testing.T) {
 	res := callTool(t, kube.SingleFakeFactory(kube.NewFakeClient()), "workload_health", map[string]any{"namespace": "app", "kind": "Deployment", "name": "nope"})
 	if !res.IsError {
 		t.Error("want error")
+	}
+}
+
+func setStatuses(p map[string]any, key string, cs ...any) map[string]any {
+	p["status"].(map[string]any)[key] = cs
+	return p
+}
+
+func terminated(reason string, exit int, finished string) map[string]any {
+	return map[string]any{"terminated": map[string]any{"reason": reason, "exitCode": exit, "finishedAt": finished}}
+}
+
+func TestWorkloadHealthMidRolloutKeepsBothRevisions(t *testing.T) {
+	out := health(t, hDeploy(2, 1), hRS("web-1", 1), hRS("web-2", 1),
+		hPod("old", "web-1", "Running", true, nil, nil), hPod("new", "web-2", "Running", false, nil, nil))
+	if len(out.Pods) != 2 {
+		t.Errorf("both revisions must be present: %+v", out.Pods)
+	}
+}
+
+func TestWorkloadHealthKeepsPodsWithUnknownReplicaSet(t *testing.T) {
+	out := health(t, hDeploy(1, 1), hRS("web-1", 1), hPod("lost", "gone-rs", "Running", true, nil, nil))
+	if len(out.Pods) != 1 || !strings.Contains(out.Note, "could not be attributed") {
+		t.Errorf("pods %+v note %q", out.Pods, out.Note)
+	}
+}
+
+func TestWorkloadHealthCurrentTerminatedState(t *testing.T) {
+	oom := hPod("p", "web-1", "Failed", false, nil, nil)
+	setStatuses(oom, "containerStatuses", map[string]any{"name": "app", "ready": false, "state": terminated("OOMKilled", 137, "2026-11-04T10:00:00Z")})
+	out := health(t, hDeploy(1, 0), hRS("web-1", 1), oom)
+	wantFinding(t, out, "critical", "pod/p/lastState", "OOMKilled", "128Mi")
+	if lt := out.Pods[0].LastTermination; lt == nil || lt.Reason != "OOMKilled" || lt.ExitCode != 137 {
+		t.Errorf("%+v", out.Pods[0])
+	}
+
+	job := hPod("j", "web-1", "Failed", false, nil, nil)
+	setStatuses(job, "containerStatuses", map[string]any{"name": "app", "ready": false, "state": terminated("Error", 1, "2026-11-04T10:00:00Z")})
+	out = health(t, hDeploy(1, 0), hRS("web-1", 1), job)
+	wantFinding(t, out, "critical", "pod/j/lastState", "exit code 1")
+	if lt := out.Pods[0].LastTermination; lt == nil || lt.ExitCode != 1 {
+		t.Errorf("%+v", out.Pods[0])
+	}
+}
+
+func TestWorkloadHealthSelectsFailingContainer(t *testing.T) {
+	p := hPod("p", "web-1", "Running", false, nil, nil)
+	setStatuses(p, "containerStatuses",
+		map[string]any{"name": "side", "ready": true, "state": map[string]any{"running": map[string]any{}}, "lastState": terminated("Completed", 0, "2020-01-01T00:00:00Z")},
+		map[string]any{"name": "app", "ready": false, "restartCount": 2, "state": map[string]any{"running": map[string]any{}}, "lastState": terminated("OOMKilled", 137, "2026-11-04T10:00:00Z")})
+	out := health(t, hDeploy(1, 0), hRS("web-1", 1), p)
+	if lt := out.Pods[0].LastTermination; lt == nil || lt.Reason != "OOMKilled" {
+		t.Errorf("%+v", out.Pods[0])
+	}
+}
+
+func TestWorkloadHealthInitContainers(t *testing.T) {
+	crash := hPod("c", "web-1", "Pending", false, nil, nil)
+	setStatuses(crash, "initContainerStatuses", map[string]any{"name": "migrate", "restartCount": 4,
+		"state":     map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}},
+		"lastState": terminated("Error", 3, "2026-11-04T10:00:00Z")})
+	out := health(t, hDeploy(1, 0), hRS("web-1", 1), crash)
+	wantFinding(t, out, "critical", "pod/c/lastState", "init:migrate", "CrashLoopBackOff", "exit code 3")
+	if out.Pods[0].WaitingReason != "Init:CrashLoopBackOff" {
+		t.Errorf("%+v", out.Pods[0])
+	}
+
+	stuck := hPod("s", "web-1", "Pending", false, nil, nil)
+	stuck["metadata"].(map[string]any)["creationTimestamp"] = "2020-01-01T00:00:00Z"
+	setStatuses(stuck, "initContainerStatuses", map[string]any{"name": "wait-db", "ready": false,
+		"state": map[string]any{"running": map[string]any{"startedAt": "2020-01-01T00:00:05Z"}}})
+	out = health(t, hDeploy(1, 0), hRS("web-1", 1), stuck)
+	wantFinding(t, out, "warning", "pod/s/status", "init container wait-db still running after")
+
+	fresh := hPod("f", "web-1", "Pending", false, nil, nil)
+	setStatuses(fresh, "initContainerStatuses", map[string]any{"name": "wait-db", "ready": false,
+		"state": map[string]any{"running": map[string]any{"startedAt": time.Now().UTC().Format(time.RFC3339)}}})
+	out = health(t, hDeploy(1, 0), hRS("web-1", 1), fresh)
+	for _, f := range out.Findings {
+		if strings.Contains(f.Summary, "still running") {
+			t.Errorf("fresh init flagged: %+v", f)
+		}
+	}
+}
+
+func TestWorkloadHealthTerminatingAndOtherFailed(t *testing.T) {
+	term := hPod("t", "web-1", "Running", true, nil, nil)
+	term["metadata"].(map[string]any)["deletionTimestamp"] = "2020-01-01T00:00:00Z"
+	out := health(t, hDeploy(1, 1), hRS("web-1", 1), term)
+	wantFinding(t, out, "warning", "pod/t/status", "Terminating")
+
+	failed := hPod("d", "web-1", "Failed", false, nil, map[string]any{"reason": "DeadlineExceeded", "message": "Pod was active longer than allowed"})
+	out = health(t, hDeploy(1, 0), hRS("web-1", 1), failed)
+	wantFinding(t, out, "warning", "pod/d/status", "DeadlineExceeded", "active longer")
+}
+
+func TestWorkloadHealthRedactsTokenInWaitingMessage(t *testing.T) {
+	w := map[string]any{"state": map[string]any{"waiting": map[string]any{"reason": "ImagePullBackOff", "message": "pull failed ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}, "image": "r/app:1"}
+	out := health(t, hDeploy(1, 0), hRS("web-1", 1), hPod("p", "web-1", "Pending", false, w, nil))
+	if strings.Contains(fmt.Sprint(out.Findings), "ghp_abcdefghij") {
+		t.Errorf("token in findings: %+v", out.Findings)
 	}
 }
