@@ -4,3 +4,4 @@ dist/
 kubeconfig*
 .DS_Store
 .superpowers/
+test/injection/eval/results/
