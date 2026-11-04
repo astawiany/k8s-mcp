@@ -1,0 +1,3 @@
+# Code owners. With "Require review from Code Owners" enabled (scripts/protect-branch.sh
+# --approvals 1 or more), a pull request needs the owner's approval.
+* @astawiany

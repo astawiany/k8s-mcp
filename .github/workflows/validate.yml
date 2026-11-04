@@ -1,0 +1,106 @@
+# Gate for pushes to main and pull requests: lint, test, integration (kind), plus a non-required
+# security job. The job ids lint, test and integration are the required status checks that
+# scripts/protect-branch.sh configures; rename them there too. The security job is deliberately not
+# required (see OPTIONAL_JOBS in scripts/protect-branch.sh): it downloads vulnerability databases at
+# run time, and an upstream outage or a newly published CVE must not block unrelated merges.
+#
+# Third-party actions are pinned by commit SHA (see .github/README.md for the bump recipe). Go, kind,
+# kubectl and Trivy come from sha256-verified downloads (scripts/ci-install-tools.sh, pins in
+# versions.env), so the only third-party action is actions/checkout.
+---
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Never let the go command download a different toolchain behind the pinned one.
+  GOTOOLCHAIN: local
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: |
+          export GO_ROOT_DIR="$HOME/.local/goroot"
+          scripts/ci-install-tools.sh go actionlint
+          echo "$GO_ROOT_DIR/go/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$GO_ROOT_DIR/go/bin:$HOME/.local/bin:$PATH"
+          # pipx: ubuntu-24.04's system Python refuses pip --user installs (PEP 668)
+          scripts/ci-install-tools.sh yamllint
+      # gofmt, go vet, staticcheck (pinned in versions.env) and yamllint --strict
+      - run: make lint
+      - name: shellcheck
+        run: shellcheck scripts/*.sh test/integration/run.sh
+      - name: actionlint
+        run: actionlint
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Go
+        run: |
+          export GO_ROOT_DIR="$HOME/.local/goroot"
+          scripts/ci-install-tools.sh go
+          echo "$GO_ROOT_DIR/go/bin" >> "$GITHUB_PATH"
+      - run: go test -race ./...
+
+  # Real kind cluster through test/integration/run.sh (creates and always deletes k8s-mcp-it).
+  # Runs on pull requests too; it needs Docker, which the ubuntu runner provides.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: |
+          export GO_ROOT_DIR="$HOME/.local/goroot"
+          scripts/ci-install-tools.sh go kind kubectl
+          echo "$GO_ROOT_DIR/go/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Raise inotify limits (kind nodes run systemd; the runner default is low)
+        run: sudo sysctl -w fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288
+      - run: make integration
+
+  # Not a required check, see the header. It still fails the run (and shows red) on a fixable
+  # HIGH/CRITICAL finding; it just is not in the branch protection contexts.
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: |
+          export GO_ROOT_DIR="$HOME/.local/goroot"
+          scripts/ci-install-tools.sh go trivy
+          echo "$GO_ROOT_DIR/go/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: govulncheck
+        run: make vuln
+      - name: Trivy filesystem scan (fixable HIGH and CRITICAL fail)
+        run: trivy fs --no-progress --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .
