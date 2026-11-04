@@ -95,8 +95,9 @@ sa_kubeconfig() {
 	server=$(k config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
 	ca=$(k config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
 	token=$(k -n "$ns" create token "$sa" --duration=1h)
-	umask 077
-	cat >"$out" <<EOF
+	(
+		umask 077
+		cat >"$out" <<EOF
 apiVersion: v1
 kind: Config
 clusters:
@@ -113,6 +114,7 @@ contexts:
   context: {cluster: $CLUSTER, user: $sa}
 current-context: $ctx
 EOF
+	)
 }
 
 # can_i_no <identity> <verb> <resource> <namespace>: RBAC must deny.
@@ -130,6 +132,9 @@ done
 kv=$(kind version | awk '{print $2}')
 [[ $kv == "v$KIND_VERSION" ]] || die "kind $kv found, versions.env pins v$KIND_VERSION"
 docker info >/dev/null 2>&1 || die "docker is not running"
+kubectl_v=$(kubectl version --client 2>/dev/null | awk '/^Client Version:/ {print $3}')
+[[ $kubectl_v == "v$KUBECTL_VERSION" ]] ||
+	echo "run.sh: WARNING: kubectl $kubectl_v differs from KUBECTL_VERSION v$KUBECTL_VERSION (scripts/ci-install-tools.sh kubectl)" >&2
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
 	die "a kind cluster named $CLUSTER already exists; it is not ours to delete (kind delete cluster --name $CLUSTER)"
 fi
@@ -145,6 +150,7 @@ kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" --kubeconfig "$
 	die "context $CTX does not point at a local kind API server"
 
 phase "install flux (verified manifests)"
+flux_images=("$FLUX_SOURCE_CONTROLLER_IMAGE" "$FLUX_KUSTOMIZE_CONTROLLER_IMAGE" "$FLUX_HELM_CONTROLLER_IMAGE")
 mkdir -p "$WORK/flux/manifests"
 curl -fsSL --retry 3 -o "$WORK/flux/manifests.tar.gz" \
 	"https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/manifests.tar.gz"
@@ -159,13 +165,27 @@ tar -xzf "$WORK/flux/manifests.tar.gz" -C "$WORK/flux/manifests"
 	echo "resources: [namespace.yaml, manifests/rbac.yaml, manifests/source-controller.yaml,"
 	echo "  manifests/kustomize-controller.yaml, manifests/helm-controller.yaml]"
 	echo "images:"
-	for img in "$FLUX_SOURCE_CONTROLLER_IMAGE" "$FLUX_KUSTOMIZE_CONTROLLER_IMAGE" "$FLUX_HELM_CONTROLLER_IMAGE"; do
-		echo "- name: ${img%%:*}"
-		echo "  digest: ${img##*@}"
+	# manifests.tar.gz names the images fluxcd/<name>:<tag>, install.yaml
+	# ghcr.io/fluxcd/<name>:<tag>; kustomize matches names exactly, so both
+	# spellings are rewritten to the pinned ghcr.io digest.
+	for img in "${flux_images[@]}"; do
+		repo=${img%@*}
+		for name in "$repo" "${repo#ghcr.io/}"; do
+			echo "- name: $name"
+			echo "  newName: $repo"
+			echo "  digest: ${img#*@}"
+		done
 	done
 } >"$WORK/flux/kustomization.yaml"
 printf 'apiVersion: v1\nkind: Namespace\nmetadata:\n  name: flux-system\n' >"$WORK/flux/namespace.yaml"
 k apply --server-side -k "$WORK/flux"
+# Every flux-system container must run a pinned digest from versions.env.
+deployed=$(k -n flux-system get deploy -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{end}')
+[[ $(wc -l <<<"$deployed") -eq ${#flux_images[@]} ]] || die "flux-system runs $(wc -l <<<"$deployed") containers, want ${#flux_images[@]}"
+while read -r img; do
+	[[ $img == *@sha256:* && " ${flux_images[*]} " == *" $img "* ]] || die "flux-system image $img is not a pinned digest from versions.env"
+	echo "  ok: $img"
+done <<<"$deployed"
 
 phase "apply fixtures"
 k apply -f "$ROOT/deploy/rbac/readonly-clusterrole.yaml"
@@ -195,6 +215,14 @@ poll 180 "failing-readiness phase/started/ready" '^Running/true/false$' -n broke
 k -n broken wait pod/log-injection pod/secret-user --for=condition=Ready --timeout=180s
 poll 180 "GitRepository unreachable Ready status/reason" '^False/GitOperationFailed$' -n broken gitrepository/unreachable \
 	-o jsonpath='{.status.conditions[?(@.type=="Ready")].status}/{.status.conditions[?(@.type=="Ready")].reason}'
+# Whether Flux itself already hides the URL password (the tool scrubs it
+# either way; the tests check that no output contains it).
+raw=$(k -n broken get gitrepository/unreachable -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')
+if [[ $raw == *s3cr3tpass-k8smcp* ]]; then
+	echo "  note: the raw GitRepository Ready message contains the URL password (Flux does not mask it)"
+else
+	echo "  note: the raw GitRepository Ready message does not contain the URL password (Flux masks it): ${raw:0:120}"
+fi
 poll 180 "HelmRelease failing Ready" '^False$' -n broken helmrelease/failing \
 	-o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
 

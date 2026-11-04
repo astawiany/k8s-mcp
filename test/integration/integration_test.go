@@ -56,7 +56,8 @@ const (
 )
 
 // neverVisible must not appear in any byte the server writes.
-var neverVisible = []string{corpus.SecretCanary, corpus.SecretCanaryBase64, fluxPassword, githubToken, pemBody}
+// TestMain adds the ServiceAccount tokens run.sh minted.
+var neverVisible = []string{corpus.SecretCanary, corpus.SecretCanaryBase64, fluxPassword, githubToken, pemBody, pemBody2}
 
 var (
 	binPath                         string
@@ -73,6 +74,24 @@ func TestMain(m *testing.M) {
 	if adminKC == "" || readonlyKC == "" || nsReaderKC == "" {
 		fmt.Fprintln(os.Stderr, "integration tests need the kind cluster and kubeconfigs from test/integration/run.sh: run make integration")
 		os.Exit(1)
+	}
+	for _, kc := range []string{readonlyKC, nsReaderKC} {
+		cfg, err := clientcmd.LoadFromFile(kc)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "load", kc, err)
+			os.Exit(1)
+		}
+		n := 0
+		for _, ai := range cfg.AuthInfos {
+			if ai.Token != "" {
+				neverVisible = append(neverVisible, ai.Token)
+				n++
+			}
+		}
+		if n == 0 {
+			fmt.Fprintln(os.Stderr, "no ServiceAccount token in", kc)
+			os.Exit(1)
+		}
 	}
 	dir, err := os.MkdirTemp("", "k8s-mcp-it-bin-")
 	if err != nil {
@@ -97,7 +116,7 @@ func TestMain(m *testing.M) {
 		code = 1
 	} else {
 		procsMu.Lock()
-		fmt.Fprintf(os.Stderr, "session-wide scan: %d server processes, no canary, URL password, token or key body in stdout or stderr\n", len(procs))
+		fmt.Fprintf(os.Stderr, "session-wide scan: %d server processes, no canary, URL password, token, key body or ServiceAccount token in stdout or stderr\n", len(procs))
 		procsMu.Unlock()
 	}
 	_ = os.RemoveAll(dir)
@@ -307,19 +326,17 @@ func TestWorkloadHealthNamesEachCause(t *testing.T) {
 		name string
 		want *regexp.Regexp // must match a critical or warning finding
 	}{
-		{"crashloop", regexp.MustCompile(`CrashLoopBackOff.*last exit code 1\b`)},
+		{"crashloop", regexp.MustCompile(`(CrashLoopBackOff|restarting repeatedly): \d+ restarts, last exit code 1\b`)},
 		{"oomkilled", regexp.MustCompile(`OOMKilled.*memory limit 16Mi`)},
 		{"imagepull", regexp.MustCompile(`cannot pull image "registry\.k8s\.io/pause:0\.0\.0-k8s-mcp-does-not-exist" \((ImagePullBackOff|ErrImagePull)\)`)},
 		{"unschedulable", regexp.MustCompile(`(?i)unschedulable.*Insufficient cpu`)},
 		{"failing-readiness", regexp.MustCompile(`Running but not Ready: readiness is failing`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// A crashing container cycles through running, terminated and
-			// waiting (CrashLoopBackOff); re-read for a bounded time until
-			// the pod is in the state the cause is named for.
+			// Pod status is written asynchronously; allow a short re-read.
 			var h health
 			var hit bool
-			eventually(t, 90*time.Second, func() bool {
+			eventually(t, 20*time.Second, func() bool {
 				h = health{}
 				p.payload(t, "workload_health", map[string]any{"namespace": ns, "kind": "Deployment", "name": tc.name}, &h)
 				for _, f := range h.Findings {
@@ -671,5 +688,8 @@ func TestNamespaceScopedIdentityDegradesGracefully(t *testing.T) {
 	if text := p.mustError(t, "list_resources", map[string]any{"kind": "pods", "namespace": "kube-system"}); !strings.Contains(text, "forbidden by RBAC") {
 		t.Errorf("list pods in kube-system as ns-reader: %s", text)
 	}
-	p.mustError(t, "get_resource", map[string]any{"kind": "Secret", "namespace": ns, "name": "db-credentials"})
+	text := p.mustError(t, "get_resource", map[string]any{"kind": "Secret", "namespace": ns, "name": "db-credentials"})
+	if !strings.Contains(text, "never reads or returns Secret objects") && !strings.Contains(text, "forbidden by RBAC") {
+		t.Errorf("get Secret as ns-reader: want the Secret refusal or forbidden by RBAC, got:\n%s", text)
+	}
 }
