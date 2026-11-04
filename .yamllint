@@ -1,0 +1,15 @@
+---
+# yamllint configuration (make lint). Pinned version: versions.env.
+extends: default
+
+ignore: |
+  .git/
+  .superpowers/
+  bin/
+  dist/
+
+rules:
+  line-length:
+    max: 120
+  truthy:
+    check-keys: false

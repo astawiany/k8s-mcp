@@ -16,7 +16,7 @@ lint:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 	go vet ./...
 	go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
-	@if command -v yamllint >/dev/null 2>&1; then yamllint -d relaxed . ; \
+	@if command -v yamllint >/dev/null 2>&1; then yamllint --strict . ; \
 	else echo "yamllint not installed locally: skipping (CI installs yamllint==$(YAMLLINT_VERSION))"; fi
 
 test:
