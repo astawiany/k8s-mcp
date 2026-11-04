@@ -25,15 +25,15 @@ type clusterInfoOut struct {
 	Context       string `json:"context"`
 	ServerVersion string `json:"serverVersion"`
 	Nodes         struct {
-		Total     int      `json:"total"`
-		Ready     int      `json:"ready"`
-		NotReady  []string `json:"notReady"`
-		Truncated bool     `json:"truncated"`
+		Total             int      `json:"total"`
+		Ready             int      `json:"ready"`
+		NotReady          []string `json:"notReady"`
+		Truncated         bool     `json:"truncated"`
+		TotalIsLowerBound bool     `json:"totalIsLowerBound"`
 	} `json:"nodes"`
-	NodesNote         string `json:"nodesNote"`
-	APIGroupsNote     string `json:"apiGroupsNote"`
-	TotalIsLowerBound bool   `json:"totalIsLowerBound"`
-	APIGroups         struct {
+	NodesNote     string `json:"nodesNote"`
+	APIGroupsNote string `json:"apiGroupsNote"`
+	APIGroups     struct {
 		Metrics    bool `json:"metrics"`
 		Flux       bool `json:"flux"`
 		GatewayAPI bool `json:"gatewayAPI"`
@@ -148,7 +148,7 @@ func TestClusterInfoTotalIsLowerBoundAtPageCap(t *testing.T) {
 	}
 	var out clusterInfoOut
 	decode(t, callTool(t, kube.SingleFakeFactory(kube.NewFakeClient(nodes...)), "cluster_info", nil), &out)
-	if out.Nodes.Total != 10000 || !out.TotalIsLowerBound {
-		t.Errorf("total=%d lowerBound=%v", out.Nodes.Total, out.TotalIsLowerBound)
+	if out.Nodes.Total != 10000 || !out.Nodes.TotalIsLowerBound {
+		t.Errorf("total=%d lowerBound=%v", out.Nodes.Total, out.Nodes.TotalIsLowerBound)
 	}
 }
