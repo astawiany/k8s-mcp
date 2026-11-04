@@ -9,4 +9,8 @@ import "github.com/astawiany/k8s-mcp/internal/server"
 func RegisterAll(s *server.Server) {
 	registerListContexts(s)
 	registerClusterInfo(s)
+	registerList(s)
+	registerGet(s)
+	registerDescribe(s)
+	registerEvents(s)
 }
