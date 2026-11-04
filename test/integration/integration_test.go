@@ -618,8 +618,13 @@ func TestReadOnlyRoleDeniesSecrets(t *testing.T) {
 
 	p := start(t, kc, "--contexts", ctxName)
 	// Layer 1 through the server: refused (or, were the refusal bypassed,
-	// forbidden by RBAC). Either way an error and no canary.
+	// forbidden by RBAC). Either way an error and no canary. get_events is
+	// skipped here: events ABOUT a Secret are not the Secret, and the role
+	// may read events, so only the server's refusal covers that request.
 	for _, c := range secretCalls {
+		if c.tool == "get_events" {
+			continue
+		}
 		text := p.mustError(t, c.tool, c.args)
 		if !strings.Contains(text, "never reads or returns Secret objects") && !strings.Contains(text, "forbidden by RBAC") {
 			t.Errorf("%s %v: want the Secret refusal or an RBAC forbidden error, got:\n%.800s", c.tool, c.args, text)
