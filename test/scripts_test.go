@@ -423,9 +423,15 @@ func runCleanup(t *testing.T, rc int, kubectlOut string) (diag string, code int,
 	writeStub(t, stubs, "kind", `if [ "$1 $2" = "export logs" ]; then
   for p in kube-system_etcd_u1/etcd flux-system_source_u2/manager broken_log-injection_u3/app broken_other_u4/app local-path-storage_prov_u5/p; do
     mkdir -p "$3/node/pods/${p%%/*}/${p##*/}"
-    echo "stdout of $p ghp_K8sMcpCanaryGithubToken0123456789 -----BEGIN RSA PRIVATE KEY-----" > "$3/node/pods/${p%%/*}/${p##*/}/0.log"
+    echo "stdout of $p" > "$3/node/pods/${p%%/*}/${p##*/}/0.log"
   done
+  echo "-----BEGIN RSA PRIVATE KEY-----" > "$3/node/pods/kube-system_etcd_u1/etcd/1.log"
   echo journal > "$3/node/kubelet.log"
+  mkdir -p "$3/node/containers"
+  ln -s ../pods/broken_log-injection_u3/app/0.log "$3/node/containers/log-injection_broken_app-u3.log"
+  echo "ghp_K8sMcpCanaryGithubToken0123456789" > "$3/node/containers/log-injection_copy.log"
+  echo apt > "$3/node/alternatives.log"
+  echo v > "$3/kind-version.txt"
 fi
 exit 0
 `)
@@ -456,6 +462,17 @@ func TestDiagnosticsDropFixturePodLogsKeepInfra(t *testing.T) {
 			t.Errorf("fixture pod log %s survived in the uploaded directory\n%s", gone, out)
 		}
 	}
+	if !exists(filepath.Join(pods, "kube-system_etcd_u1", "etcd", "0.log")) || exists(filepath.Join(pods, "kube-system_etcd_u1", "etcd", "1.log")) {
+		t.Error("final marker sweep: plain log must stay, the file with the fixture marker must go")
+	}
+	for _, gone := range []string{"containers", "alternatives.log"} {
+		if exists(filepath.Join(diag, "kind", "node", gone)) {
+			t.Errorf("%s survived the allow-list prune", gone)
+		}
+	}
+	if !exists(filepath.Join(diag, "kind", "kind-version.txt")) {
+		t.Error("kind-version.txt lost")
+	}
 	if !exists(filepath.Join(diag, "kind", "node", "kubelet.log")) || !exists(filepath.Join(diag, "pods-events.txt")) {
 		t.Error("kubelet journal or get/describe output lost")
 	}
@@ -475,5 +492,86 @@ func TestCleanupPreservesOriginalExitCode(t *testing.T) {
 	diag, code, out := runCleanup(t, 130, "password k8smcp-canary-secret-value-7f3a9c2e51d4")
 	if code != 130 || !strings.Contains(out, "contains a secret value") || exists(filepath.Join(diag, "pods-events.txt")) {
 		t.Errorf("leak handling: code=%d\n%s", code, out)
+	}
+}
+
+func TestPruneExportIsAnAllowList(t *testing.T) {
+	src := readFileT(t, filepath.Join(repoRoot(t), "test", "integration", "run.sh"))
+	from, to := strings.Index(src, "# prune_export <dir>"), strings.Index(src, "dump_diagnostics() {")
+	if from < 0 || to < 0 {
+		t.Fatal("cannot slice run.sh")
+	}
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside-secret.txt")
+	if err := os.WriteFile(outside, []byte("must survive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "export")
+	node := filepath.Join(root, "kind-control-plane")
+	files := map[string]string{
+		"kind-version.txt": "v", "docker-info.txt": "d", "stray.txt": "x",
+		"kind-control-plane/kubelet.log": "k", "kind-control-plane/containerd.log": "c", "kind-control-plane/journal.log": "j",
+		"kind-control-plane/inspect.json": "{}", "kind-control-plane/kubernetes-version.txt": "v1",
+		"kind-control-plane/alternatives.log": "a", "kind-control-plane/apt/history.log": "a",
+		"kind-control-plane/containers/log-injection_broken_app-u3.log": "ghp_x",
+		"kind-control-plane/pods/default_log-injection_x/app/0.log":     "ghp_x",
+		"kind-control-plane/pods/kube-system_etcd_y/etcd/0.log":         "etcd",
+		"kind-control-plane/pods/flux-system_source_z/manager/0.log":    "flux",
+		"kind-control-plane/pods/local-path-storage_p_w/p/0.log":        "lps",
+		"kind-control-plane/pods/broken_other_q/app/0.log":              "other",
+	}
+	for rel, body := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := map[string]string{
+		"kind-control-plane/containers/link-to-outside.log":             outside,
+		"kind-control-plane/pods/default_log-injection_link":            filepath.Join(base),
+		"kind-control-plane/pods/kube-system_symlinked":                 base,
+		"kind-control-plane/journal-link.log":                           outside,
+		"kind-control-plane/pods/kube-system_etcd_y/etcd/escape":        outside,
+		"kind-control-plane/pods/kube-system_etcd_y/etcd/escape-to-dir": base,
+	}
+	for rel, target := range links {
+		if err := os.Symlink(target, filepath.Join(root, rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = node
+	script := "set -uo pipefail\n" + src[from:to] + "\nprune_export " + root + "\n"
+	if out, err := exec.Command("/bin/bash", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("prune_export: %v\n%s", err, out)
+	}
+	keep := []string{
+		"kind-version.txt", "docker-info.txt", "kind-control-plane/kubelet.log", "kind-control-plane/containerd.log",
+		"kind-control-plane/journal.log", "kind-control-plane/inspect.json", "kind-control-plane/kubernetes-version.txt",
+		"kind-control-plane/pods/kube-system_etcd_y/etcd/0.log", "kind-control-plane/pods/flux-system_source_z/manager/0.log",
+		"kind-control-plane/pods/local-path-storage_p_w/p/0.log",
+	}
+	gone := []string{
+		"stray.txt", "kind-control-plane/alternatives.log", "kind-control-plane/apt", "kind-control-plane/containers",
+		"kind-control-plane/pods/default_log-injection_x", "kind-control-plane/pods/default_log-injection_link",
+		"kind-control-plane/pods/broken_other_q", "kind-control-plane/pods/kube-system_etcd_y/etcd/escape", "kind-control-plane/pods/kube-system_etcd_y/etcd/escape-to-dir", "kind-control-plane/pods/kube-system_symlinked", "kind-control-plane/journal-link.log",
+	}
+	for _, k := range keep {
+		if !exists(filepath.Join(root, k)) {
+			t.Errorf("allow-listed %s was removed", k)
+		}
+	}
+	for _, g := range gone {
+		if _, err := os.Lstat(filepath.Join(root, g)); err == nil {
+			t.Errorf("%s survived the prune", g)
+		}
+	}
+	if b, err := os.ReadFile(outside); err != nil || string(b) != "must survive" {
+		t.Fatalf("a symlink was followed: the target outside the tree is gone or changed (%v)", err)
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatal(err)
 	}
 }

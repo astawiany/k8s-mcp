@@ -23,14 +23,24 @@ shows red when it finds something; treat that as a to-do, not as noise.
 
 ### Failure diagnostics artifact
 
-When `integration` fails, the `integration-diagnostics` artifact contains: `kubectl get pods,events -A`,
-`describe` of the pods that are not ready, the last 200 log lines of the `flux-system` pods and the
-`kind export logs` output reduced to the pod logs of `kube-system`, `flux-system` and
-`local-path-storage` plus node and kubelet logs. Pod logs of every other namespace, in particular the
-`log-injection` fixture with its intentional fake credentials, are deleted from the export; Secrets
-and kubeconfigs are never dumped, and files containing the real canary value, a minted ServiceAccount
-token or any JWT are deleted. For a public repository the artifact is downloadable by anyone signed
-in to GitHub, so treat its content as public. It expires after 7 days (`retention-days: 7`).
+When `integration` fails, the `integration-diagnostics` artifact contains exactly:
+
+- `pods-events.txt`: `kubectl get pods,events -A -o wide`;
+- `describe-<ns>-<pod>.txt`: `describe` of the pods that are not ready;
+- `flux-logs/`: the last 200 log lines of each `flux-system` pod;
+- `kind/`, an allow-listed reduction of `kind export logs`: the top-level `kind-version.txt` and
+  `docker-info.txt`, and per node only `kubelet.log`, `containerd.log`, `journal.log`, `inspect.json`,
+  `kubernetes-version.txt` and the pod-log directories `pods/kube-system_*`, `pods/flux-system_*` and
+  `pods/local-path-storage_*`. Everything else kind copies from the node's `/var/log` is deleted
+  (`containers/`, the pod logs of every other namespace, in particular the `log-injection` fixture with
+  its intentional fake credentials, apt and alternatives logs, ...), as are symlinks. Deletion never
+  follows symlinks.
+
+Secrets and kubeconfigs are never dumped. Files containing the real canary value, a minted
+ServiceAccount token or any JWT are deleted with an error message, and a final sweep deletes any
+remaining file holding the fixture's fake credentials; neither changes the exit code of the run. For a
+public repository the artifact is downloadable by anyone signed in to GitHub, so treat its content as
+public. It expires after 7 days (`retention-days: 7`).
 
 Go, kind, kubectl, Trivy and actionlint are installed by `scripts/ci-install-tools.sh` from
 official release archives whose sha256 is pinned in `versions.env` (a mismatch aborts the job).

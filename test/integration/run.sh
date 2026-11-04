@@ -54,6 +54,67 @@ phase() {
 # removed from the export instead.
 DIAG_DIR=${IT_DIAG_DIR:-$ROOT/.integration-diagnostics}
 SCRUB_VALUES=(k8smcp-canary-secret-value-7f3a9c2e51d4 azhzbWNwLWNhbmFyeS1zZWNyZXQtdmFsdWUtN2YzYTljMmU1MWQ0)
+# prune_export <dir>: reduce the output of `kind export logs` to an allow-list before it leaves the
+# runner (the artifact of a public repository is downloadable by anyone signed in to GitHub). kind
+# copies each node's whole /var/log (pods/, containers/, apt, alternatives.log, ...) next to
+# kubelet.log, containerd.log, journal.log and inspect.json. Symlinks inside kept pod dirs are deleted too. Kept: the top-level kind-version.txt and
+# docker-info.txt; per node kubelet.log, containerd.log, journal.log, inspect.json,
+# kubernetes-version.txt and pods/{kube-system,flux-system,local-path-storage}_* (contents intact).
+# Everything else is removed. rm -rf and find never follow symlinks, so a link is removed, not its target.
+prune_export() {
+	local root=$1 top node ent pd
+	[[ -d $root ]] || return 0
+	while IFS= read -r -d '' top; do
+		if [[ -d $top && ! -L $top ]]; then
+			node=$top
+			while IFS= read -r -d '' ent; do
+				case ${ent##*/} in
+				kubelet.log | containerd.log | journal.log | inspect.json | kubernetes-version.txt)
+					[[ -f $ent && ! -L $ent ]] || rm -rf "$ent" ;;
+				pods)
+					if [[ -d $ent && ! -L $ent ]]; then
+						while IFS= read -r -d '' pd; do
+							case ${pd##*/} in
+							kube-system_* | flux-system_* | local-path-storage_*)
+								if [[ -d $pd && ! -L $pd ]]; then
+									# no symlinks in what is uploaded (upload tools may follow them)
+									find "$pd" -type l -delete
+								else
+									rm -rf "$pd"
+								fi ;;
+							*) rm -rf "$pd" ;;
+							esac
+						done < <(find "$ent" -mindepth 1 -maxdepth 1 -print0)
+					else
+						rm -rf "$ent"
+					fi ;;
+				*) rm -rf "$ent" ;;
+				esac
+			done < <(find "$node" -mindepth 1 -maxdepth 1 -print0)
+		else
+			case ${top##*/} in
+			kind-version.txt | docker-info.txt) [[ -f $top && ! -L $top ]] || rm -rf "$top" ;;
+			*) rm -rf "$top" ;;
+			esac
+		fi
+	done < <(find "$root" -mindepth 1 -maxdepth 1 -print0)
+}
+
+# sweep_fixture_markers <dir>: belt and braces. Delete any remaining regular file that holds the
+# intentional fake credentials of the log-injection fixture or the Secret canary. Silent: the exit
+# code of the run is not touched, and the markers are not scrub errors (they are planted on purpose).
+sweep_fixture_markers() {
+	local f m
+	while IFS= read -r -d '' f; do
+		for m in ghp_K8sMcpCanary 'BEGIN RSA PRIVATE KEY' k8smcp-canary-secret-value; do
+			if grep -qF -- "$m" "$f" 2>/dev/null; then
+				rm -f "$f"
+				break
+			fi
+		done
+	done < <(find "$1" -type f -print0)
+}
+
 dump_diagnostics() {
 	local d=$DIAG_DIR name f v leaked=0 pd
 	rm -rf "$d"
@@ -77,18 +138,7 @@ dump_diagnostics() {
 	else
 		kind export logs "$d/kind" --name "$CLUSTER" >/dev/null 2>&1 || true
 	fi
-	# The artifact of a public repository is downloadable by anyone signed in to GitHub, and
-	# /var/log/pods holds the stdout of the fixture pods (including the intentional fake credentials of
-	# the log-injection pod). Keep exported pod logs of the infrastructure namespaces only, and never
-	# those of the log-injection fixture. get/describe output of every namespace is kept.
-	while IFS= read -r -d '' pd; do
-		name=$(basename "$pd")
-		case $name in
-		*log-injection*) rm -rf "$pd" ;;
-		kube-system_* | flux-system_* | local-path-storage_*) ;;
-		*) rm -rf "$pd" ;;
-		esac
-	done < <(find "$d/kind" -type d -path '*/pods/*' -prune -print0 2>/dev/null)
+	prune_export "$d/kind"
 	while IFS= read -r -d '' f; do
 		for v in "${SCRUB_VALUES[@]}"; do
 			if grep -qF -- "$v" "$f"; then
@@ -104,6 +154,7 @@ dump_diagnostics() {
 			leaked=1
 		}
 	done < <(find "$d" -type f -print0)
+	sweep_fixture_markers "$d"
 	echo "== diagnostics summary (bounded)"
 	head -c 6000 "$d/pods-events.txt" 2>/dev/null | head -n 60 || true
 	return "$leaked"
