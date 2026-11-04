@@ -14,7 +14,8 @@
 # Required status checks are the job ids of .github/workflows/validate.yml, except the jobs in
 # OPTIONAL_JOBS (they download vulnerability databases at run time and must not block merges).
 # The "release" Environment has the repository owner as required reviewer and only accepts
-# deployments from v* tags. After applying, everything is read back and the script exits 1 when the
+# deployments from v* tags. The reviewer is added as type User (the owner's id): for an
+# organization-owned repository add a team reviewer by hand in Settings > Environments > release. After applying, everything is read back and the script exits 1 when the
 # release tag policy, the ruleset or the branch protection is missing.
 set -euo pipefail
 
@@ -92,7 +93,12 @@ if [ "$dry" -eq 0 ]; then
   tag_policy_id="$(gh api "repos/$repo/environments/release/deployment-branch-policies" \
     --jq '.branch_policies[] | select(.type == "tag" and .name == "v*") | .id' 2> /dev/null || true)"
   if [ "$protect_tags" -eq 1 ]; then
-    ruleset_id="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name == "release-tags") | .id')"
+    if ! ruleset_id="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name == "release-tags") | .id' 2>&1)"; then
+      echo "protect-branch: rulesets are not available for $repo (gh said: $ruleset_id)." >&2
+      echo "protect-branch: rulesets need a public repository or a paid plan, and admin rights. Nothing was changed." >&2
+      echo "protect-branch: re-run with --no-protect-tags to skip the tag ruleset (v* tags are then unprotected)." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -162,8 +168,13 @@ if [ "$dry" -eq 0 ]; then
       verify_failed=1
     fi
   fi
-  if ! gh api "repos/$repo/branches/$branch/protection" --jq '.required_status_checks.contexts | length' > /dev/null 2>&1; then
+  want_state="true $(printf '%s\n' "${checks[@]}" | sort | paste -sd, -)"
+  if ! got_state="$(gh api "repos/$repo/branches/$branch/protection" \
+    --jq '"\(.required_status_checks.strict) \(.required_status_checks.contexts | sort | join(","))"' 2> /dev/null)"; then
     echo "protect-branch: FAILED to verify: no branch protection on $branch" >&2
+    verify_failed=1
+  elif [ "$got_state" != "$want_state" ]; then
+    echo "protect-branch: FAILED to verify: required checks are '$got_state' (strict, contexts), want '$want_state'" >&2
     verify_failed=1
   fi
   [ "$verify_failed" -eq 0 ] || exit 1

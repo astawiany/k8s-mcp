@@ -6,7 +6,7 @@
 #
 # Third-party actions are pinned by commit SHA (see .github/README.md for the bump recipe). Go, kind,
 # kubectl and Trivy come from sha256-verified downloads (scripts/ci-install-tools.sh, pins in
-# versions.env), so the only third-party action is actions/checkout.
+# versions.env), so the third-party actions are actions/checkout and actions/upload-artifact.
 ---
 name: validate
 
@@ -83,6 +83,16 @@ jobs:
       - name: Raise inotify limits (kind nodes run systemd; the runner default is low)
         run: sudo sysctl -w fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288
       - run: make integration
+      # run.sh dumps pods, events, flux-system logs and kind logs here before it deletes the cluster
+      # (no Secrets; files containing a canary, token or JWT are deleted).
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: integration-diagnostics
+          path: .integration-diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # Not a required check, see the header. It still fails the run (and shows red) on a fixable
   # HIGH/CRITICAL finding; it just is not in the branch protection contexts.

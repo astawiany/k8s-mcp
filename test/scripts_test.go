@@ -65,7 +65,7 @@ func tgz(t *testing.T, members map[string]string) []byte {
 }
 
 type installEnv struct {
-	root, stubs, bin, goRoot, payload string
+	root, stubs, bin, goRoot, payload, tmp string
 }
 
 // newInstallEnv builds the temp layout. payload is what the stub curl "downloads" for any URL.
@@ -74,6 +74,10 @@ func newInstallEnv(t *testing.T, payload []byte, uname string) *installEnv {
 	e := &installEnv{root: t.TempDir(), stubs: t.TempDir()}
 	copyScript(t, e.root, "ci-install-tools.sh")
 	if err := os.WriteFile(filepath.Join(e.root, "versions.env"), []byte(readFileT(t, filepath.Join(repoRoot(t), "versions.env"))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.tmp = filepath.Join(e.root, "tmp")
+	if err := os.MkdirAll(e.tmp, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	e.bin = filepath.Join(e.root, "out-bin")
@@ -111,7 +115,7 @@ func (e *installEnv) run(t *testing.T, tool string) (string, error) {
 	cmd.Env = []string{
 		"PATH=" + e.stubs + ":/usr/bin:/bin", "HOME=" + e.root,
 		"BIN_DIR=" + e.bin, "GO_ROOT_DIR=" + e.goRoot,
-		"STUB_PAYLOAD=" + e.payload, "STUB_LOG=" + filepath.Join(e.root, "curl.log"),
+		"TMPDIR=" + e.tmp, "STUB_PAYLOAD=" + e.payload, "STUB_LOG=" + filepath.Join(e.root, "curl.log"),
 	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -138,6 +142,9 @@ func TestInstallerRejectsBadChecksum(t *testing.T) {
 			}
 			if exists(filepath.Join(e.goRoot, "go")) {
 				t.Fatal("go was unpacked despite the checksum failure")
+			}
+			if left, _ := os.ReadDir(e.tmp); len(left) != 0 {
+				t.Fatalf("temp dir left behind after the failure: %v", left)
 			}
 		})
 	}
@@ -230,7 +237,13 @@ echo "$method $path" >> "$state/calls.log"
 drop() { [ "${STUB_DROP:-}" = "$1" ]; }
 case "$method $path" in
   "GET users/"*) echo 4242 ;;
-  "PUT repos/o/r/branches/main/protection") drop protection || touch "$state/protection" ;;
+  "PUT repos/o/r/branches/main/protection")
+    drop protection || { touch "$state/protection"
+      ctx="$(echo "$body" | sed -n 's/.*"contexts": \[\(.*\)\].*/\1/p' | tr -d '" ' )"
+      [ "${STUB_DROP:-}" = contexts ] && ctx="lint"
+      strict=true; echo "$body" | grep -q '"strict": true' || strict=false
+      [ "${STUB_DROP:-}" = strict ] && strict=false
+      echo "$strict $(echo "$ctx" | tr ',' '\n' | sort | paste -sd, -)" > "$state/protection_state"; } ;;
   "PUT repos/o/r/environments/release") touch "$state/env" ;;
   "POST repos/o/r/environments/release/deployment-branch-policies") drop policy || touch "$state/policy" ;;
   "GET repos/o/r/environments/release/deployment-branch-policies")
@@ -239,9 +252,10 @@ case "$method $path" in
   "POST repos/o/r/rulesets") drop ruleset || touch "$state/ruleset" ;;
   "PUT repos/o/r/rulesets/9") touch "$state/ruleset_put" ;;
   "GET repos/o/r/rulesets")
+    if [ -n "${STUB_RULESETS_FAIL:-}" ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
     if [ -f "$state/ruleset" ]; then case "$jq" in *length*) echo 1 ;; *) echo 9 ;; esac
     else case "$jq" in *length*) echo 0 ;; esac; fi ;;
-  "GET repos/o/r/branches/main/protection") [ -f "$state/protection" ] && echo 3 || exit 1 ;;
+  "GET repos/o/r/branches/main/protection") [ -f "$state/protection" ] && cat "$state/protection_state" || exit 1 ;;
   *) echo "unexpected gh call: $method $path" >&2; exit 99 ;;
 esac
 `
@@ -356,6 +370,8 @@ func TestProtectBranchReadBackFailureExitsNonZero(t *testing.T) {
 		"policy":     "no v* tag policy",
 		"ruleset":    "no active tag ruleset",
 		"protection": "no branch protection",
+		"contexts":   "required checks are",
+		"strict":     "required checks are",
 	} {
 		t.Run(drop, func(t *testing.T) {
 			e := newProtectEnv(t)
@@ -367,5 +383,21 @@ func TestProtectBranchReadBackFailureExitsNonZero(t *testing.T) {
 				t.Fatalf("expected %q in:\n%s", msg, out)
 			}
 		})
+	}
+}
+
+func TestProtectBranchRulesetsUnavailableIsClearAndWritesNothing(t *testing.T) {
+	e := newProtectEnv(t)
+	cmd := exec.Command(filepath.Join(e.root, "scripts", "protect-branch.sh"), "--repo", "o/r")
+	cmd.Env = []string{"PATH=" + e.stubs + ":/usr/bin:/bin", "STUB_STATE=" + e.state, "STUB_RULESETS_FAIL=1", "PROTECT_VERIFY_SLEEP=0"}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected failure:\n%s", out)
+	}
+	if !strings.Contains(string(out), "rulesets are not available") || !strings.Contains(string(out), "--no-protect-tags") {
+		t.Fatalf("unclear message:\n%s", out)
+	}
+	if strings.Contains(e.calls(), "PUT ") || strings.Contains(e.calls(), "POST ") {
+		t.Fatalf("wrote before the ruleset lookup failed:\n%s", e.calls())
 	}
 }

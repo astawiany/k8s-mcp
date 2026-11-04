@@ -17,6 +17,13 @@ sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# Every temp dir is registered here and removed on any exit, including a checksum mismatch.
+TMPS=()
+cleanup_tmps() { if [ "${#TMPS[@]}" -gt 0 ]; then rm -rf "${TMPS[@]}"; fi; }
+trap cleanup_tmps EXIT
+# mk_tmp sets the caller's `tmp` (declared local there) to a fresh registered temp dir.
+mk_tmp() { tmp="$(mktemp -d "${TMPDIR:-/tmp}/ci-install.XXXXXX")"; TMPS+=("$tmp"); }
+
 # fetch_verified <url> <expected-sha256> <dest>: download, then keep the file only if its sha256
 # equals the pin. A mismatch aborts with a non-zero exit before anything is installed.
 fetch_verified() {
@@ -38,7 +45,7 @@ require_linux_amd64() {
 install_tarball_bin() {
   local tool="$1" url="$2" sha="$3" member="$4" tmp
   require_linux_amd64 "$tool"
-  tmp="$(mktemp -d)"
+  mk_tmp
   fetch_verified "$url" "$sha" "$tmp/archive.tgz"
   tar -xzf "$tmp/archive.tgz" -C "$tmp" "$member"
   mkdir -p "$BIN_DIR"
@@ -49,7 +56,7 @@ install_tarball_bin() {
 install_kubectl() {
   local tmp
   require_linux_amd64 kubectl
-  tmp="$(mktemp -d)"
+  mk_tmp
   fetch_verified "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" "$KUBECTL_SHA256_LINUX_AMD64" "$tmp/kubectl"
   mkdir -p "$BIN_DIR"
   install -m 0755 "$tmp/kubectl" "$BIN_DIR/kubectl"
@@ -59,7 +66,7 @@ install_kubectl() {
 install_kind() {
   local tmp
   require_linux_amd64 kind
-  tmp="$(mktemp -d)"
+  mk_tmp
   fetch_verified "https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-linux-amd64" "$KIND_SHA256_LINUX_AMD64" "$tmp/kind"
   mkdir -p "$BIN_DIR"
   install -m 0755 "$tmp/kind" "$BIN_DIR/kind"
@@ -71,7 +78,7 @@ install_kind() {
 install_go() {
   local tmp root="${GO_ROOT_DIR:-$HOME/.local/go-${GO_VERSION}}"
   require_linux_amd64 go
-  tmp="$(mktemp -d)"
+  mk_tmp
   fetch_verified "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" "$GO_SHA256_LINUX_AMD64" "$tmp/go.tgz"
   rm -rf "$root"
   mkdir -p "$root"

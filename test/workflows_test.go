@@ -122,6 +122,21 @@ func checkWorkflow(text string) []string {
 		if _, has := integ["if"]; has {
 			add("integration job has an if: condition; it must run on pull requests too")
 		}
+		found := false
+		steps, _ := integ["steps"].([]any)
+		for _, st := range steps {
+			step, _ := st.(map[string]any)
+			uses, _ := step["uses"].(string)
+			if strings.HasPrefix(uses, "actions/upload-artifact@") {
+				w, _ := step["with"].(map[string]any)
+				if step["if"] == "failure()" && fmt.Sprint(w["retention-days"]) == "7" && w["path"] != nil {
+					found = true
+				}
+			}
+		}
+		if !found {
+			add("integration job has no upload-artifact step with if: failure() and retention-days: 7")
+		}
 	}
 	return bad
 }
@@ -147,6 +162,7 @@ func TestValidateWorkflowRulesBite(t *testing.T) {
 		{"event interpolation in run", "run: go test -race ./...", `run: echo "${{ github.event.pull_request.title }}"`, "interpolates"},
 		{"head_ref interpolation in run", "run: go test -race ./...", `run: echo ${{ github.head_ref }}`, "interpolates"},
 		{"integration skipped on PRs", "  integration:\n", "  integration:\n    if: github.event_name != 'pull_request'\n", "must run on pull requests"},
+		{"diagnostics upload not on failure", "if: failure()\n        uses: actions/upload-artifact", "if: always()\n        uses: actions/upload-artifact", "no upload-artifact step"},
 		{"timeout removed from lint", "    timeout-minutes: 15\n", "", "no timeout-minutes"},
 	}
 	for _, c := range cases {
@@ -222,10 +238,15 @@ func TestRequiredChecksExcludeSecurity(t *testing.T) {
 
 func TestInstallerGoPinMatchesGoMod(t *testing.T) {
 	root := repoRoot(t)
-	mod := regexp.MustCompile(`(?m)^go (\S+)$`).FindStringSubmatch(readFileT(t, filepath.Join(root, "go.mod")))
+	gomod := readFileT(t, filepath.Join(root, "go.mod"))
+	// The CI toolchain is the `toolchain` line (go<version>) when go.mod has one, else the `go` line.
+	mod := regexp.MustCompile(`(?m)^go (\S+)$`).FindStringSubmatch(gomod)
+	if tc := regexp.MustCompile(`(?m)^toolchain go(\S+)$`).FindStringSubmatch(gomod); tc != nil {
+		mod = tc
+	}
 	env := regexp.MustCompile(`(?m)^GO_VERSION=(\S+)$`).FindStringSubmatch(readFileT(t, filepath.Join(root, "versions.env")))
 	if mod == nil || env == nil || mod[1] != env[1] {
-		t.Fatalf("go.mod go directive %v != versions.env GO_VERSION %v", mod, env)
+		t.Fatalf("go.mod toolchain/go %v != versions.env GO_VERSION %v", mod, env)
 	}
 }
 
@@ -235,7 +256,7 @@ func TestCodeownersAndReadme(t *testing.T) {
 		t.Fatal("CODEOWNERS lacks '* @astawiany'")
 	}
 	readme := readFileT(t, filepath.Join(root, ".github", "README.md"))
-	for _, want := range []string{"protect-branch.sh", "Environment", "release-tags", "--approvals 0", "pinned by commit SHA", "Dependabot"} {
+	for _, want := range []string{"protect-branch.sh", "Environment", "release-tags", "--approvals 0", "pinned by commit SHA", "Dependabot", "type: User", "upload-artifact"} {
 		if !strings.Contains(readme, want) {
 			t.Errorf(".github/README.md does not mention %q", want)
 		}

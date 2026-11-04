@@ -46,9 +46,55 @@ phase() {
 	echo "== [$((now - start))s] $1"
 }
 
+# Diagnostics of a failed run (written before the cluster is deleted; CI uploads the directory).
+# Never dumped: Secrets (no `get secret`), kubeconfigs. Every dumped file is then scanned for the
+# known canary, its base64 form, the ServiceAccount tokens minted by sa_kubeconfig and any JWT
+# (eyJ...); a file with a hit is deleted and the run fails loudly.
+DIAG_DIR=${IT_DIAG_DIR:-$ROOT/.integration-diagnostics}
+SCRUB_VALUES=(k8smcp-canary-secret-value-7f3a9c2e51d4 azhzbWNwLWNhbmFyeS1zZWNyZXQtdmFsdWUtN2YzYTljMmU1MWQ0)
+dump_diagnostics() {
+	local d=$DIAG_DIR name f v leaked=0
+	rm -rf "$d"
+	mkdir -p "$d/flux-logs"
+	echo "== diagnostics -> $d"
+	{
+		k get pods,events -A -o wide
+	} >"$d/pods-events.txt" 2>&1 || true
+	k get pods -A --no-headers 2>/dev/null | while read -r ns name ready status _; do
+		# describe pods that are not fully ready or not Running/Completed
+		[[ $status == Completed || ($status == Running && ${ready%%/*} == "${ready##*/}") ]] && continue
+		k -n "$ns" describe pod "$name" >"$d/describe-$ns-$name.txt" 2>&1 || true
+	done
+	for name in $(k -n flux-system get pods -o name 2>/dev/null); do
+		k -n flux-system logs "$name" --all-containers --tail=200 >"$d/flux-logs/${name#pod/}.log" 2>&1 || true
+	done
+	kind export logs "$d/kind" --name "$CLUSTER" >/dev/null 2>&1 || true
+	while IFS= read -r -d '' f; do
+		for v in "${SCRUB_VALUES[@]}"; do
+			if grep -qF -- "$v" "$f"; then
+				echo "run.sh: ERROR: diagnostics file ${f#"$d"/} contains a secret value; deleted" >&2
+				rm -f "$f"
+				leaked=1
+				break
+			fi
+		done
+		[[ -e $f ]] && grep -qE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' "$f" && {
+			echo "run.sh: ERROR: diagnostics file ${f#"$d"/} contains a JWT; deleted" >&2
+			rm -f "$f"
+			leaked=1
+		}
+	done < <(find "$d" -type f -print0)
+	echo "== diagnostics summary (bounded)"
+	head -c 6000 "$d/pods-events.txt" 2>/dev/null | head -n 60 || true
+	return "$leaked"
+}
+
 cleanup() {
 	local rc=$?
 	trap - EXIT INT TERM
+	if [[ $rc -ne 0 && $created -eq 1 ]]; then
+		dump_diagnostics || rc=1
+	fi
 	phase "delete cluster"
 	if [[ $created -eq 1 ]]; then
 		kind delete cluster --name "$CLUSTER" --kubeconfig "$KC" || rc=1
@@ -95,6 +141,7 @@ sa_kubeconfig() {
 	server=$(k config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')
 	ca=$(k config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
 	token=$(k -n "$ns" create token "$sa" --duration=1h)
+	SCRUB_VALUES+=("$token")
 	(
 		umask 077
 		cat >"$out" <<EOF

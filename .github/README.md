@@ -14,7 +14,7 @@ whole workflow, every job has a timeout, and no job reads a secret.
 | --- | --- | --- |
 | `lint` | yes | `make lint` (gofmt, go vet, pinned staticcheck, `yamllint --strict`), shellcheck on `scripts/*.sh` and `test/integration/run.sh`, actionlint |
 | `test` | yes | `go test -race ./...` |
-| `integration` | yes | `make integration`: a throwaway kind cluster (`k8s-mcp-it`) with Flux and the fixtures; Docker comes with the ubuntu runner |
+| `integration` | yes | `make integration`: a throwaway kind cluster (`k8s-mcp-it`) with Flux and the fixtures; Docker comes with the ubuntu runner. On failure `run.sh` writes diagnostics (pods, events, flux-system logs, `kind export logs`; never Secrets, files with a canary, token or JWT are deleted) before deleting the cluster, and the workflow uploads them with `actions/upload-artifact` as `integration-diagnostics` (7 days) |
 | `security` | no | `make vuln` (govulncheck) and `trivy fs` (fixable HIGH/CRITICAL fail, secrets fail) |
 
 `security` is deliberately not a required check: it downloads vulnerability databases at run time,
@@ -23,9 +23,11 @@ shows red when it finds something; treat that as a to-do, not as noise.
 
 Go, kind, kubectl, Trivy and actionlint are installed by `scripts/ci-install-tools.sh` from
 official release archives whose sha256 is pinned in `versions.env` (a mismatch aborts the job).
-The Go version is the `go` line of `go.mod` (a test keeps them equal), and `GOTOOLCHAIN=local`
-stops the go command from fetching another toolchain. The only third-party action is
-`actions/checkout`.
+The Go version is the `toolchain` line of `go.mod` (a test keeps them equal; the `go` line stays the
+language floor, and the pin is a current patch because govulncheck checks the stdlib it runs on), and `GOTOOLCHAIN=local`
+stops the go command from fetching another toolchain. The third-party actions are
+`actions/checkout` and, for failure diagnostics, `actions/upload-artifact` (SHA from
+`gh api repos/actions/upload-artifact/git/ref/tags/v7.0.2`, released 2026-10-07).
 
 ## Action pinning (no Dependabot)
 
@@ -67,13 +69,16 @@ re-checked with the first command above. Tool pins in `versions.env` carry their
    What it sets:
    - `main`: pull request required, status checks `lint`, `test`, `integration` required and up to
      date (strict). `security` is not listed.
-   - Environment `release`: required reviewer is the repository owner, deployments only from `v*`
+   - Environment `release`: required reviewer is the repository owner (added as `type: User` with the
+     owner's id, so for an organization-owned repository add a team reviewer by hand), deployments only from `v*`
      tags (a deployment tag policy). Use it in the `environment:` of any future publishing job.
    - Ruleset `release-tags` (Settings > Rules > Rulesets): only repository admins may create, move
      or delete `v*` tags, because a pushed tag runs the workflows of the tagged commit. Re-running
      updates it. Rulesets need a public repository or a paid plan.
    - Read-back: after applying, the script reads the release tag policy, the ruleset and the
-     branch protection back and exits 1 if any is missing.
+     branch protection back (strict and the exact required contexts) and exits 1 if any is missing or
+     wrong. If the rulesets API is unavailable (private repository on a free plan) it stops before
+     changing anything and tells you to use `--no-protect-tags`.
 3. Settings > Code security: enable private vulnerability reporting and secret scanning with push
    protection if the plan offers them.
 
