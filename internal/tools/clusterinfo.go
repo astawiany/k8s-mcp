@@ -21,8 +21,10 @@ type nodeSummary struct {
 	Total    int      `json:"total"`
 	Ready    int      `json:"ready"`
 	NotReady []string `json:"notReady"`
-	// Truncated is set when notReady holds only the first names or not every node was counted.
+	// Truncated is set when notReady holds only the first names.
 	Truncated bool `json:"truncated,omitempty"`
+	// TotalIsLowerBound is set when not every node was counted.
+	TotalIsLowerBound bool `json:"totalIsLowerBound,omitempty"`
 }
 
 type apiGroupFlags struct {
@@ -36,6 +38,10 @@ type clusterInfoOut struct {
 	ServerVersion string        `json:"serverVersion"`
 	Nodes         nodeSummary   `json:"nodes"`
 	APIGroups     apiGroupFlags `json:"apiGroups"`
+	// NodesNote / APIGroupsNote are set when that part could not be read:
+	// the value is then unknown, not zero.
+	NodesNote     string `json:"nodesNote,omitempty"`
+	APIGroupsNote string `json:"apiGroupsNote,omitempty"`
 }
 
 // Node pages are read until the cluster has no more, bounded so a huge
@@ -50,7 +56,10 @@ func registerClusterInfo(s *server.Server) {
 		Name: "cluster_info",
 		Description: "Summarise one cluster: server version, node counts (total, ready, names of not-ready nodes; " +
 			"at most 200 names are listed, then truncated=true; at most 10000 nodes are counted) and whether " +
-			"metrics-server, Flux and Gateway API are served. Reads nodes only; returns no server URLs.",
+			"metrics-server, Flux and Gateway API are served. A node with no Ready condition counts as not ready. " +
+			"If nodes cannot be listed (RBAC, timeout, unreachable) or API discovery fails, the rest is still " +
+			"returned with nodesNote / apiGroupsNote set: that part is unknown, not zero. totalIsLowerBound=true " +
+			"means the node count stopped early. Reads nodes only; returns no server URLs.",
 	}, server.CapRead, clusterInfo)
 }
 
@@ -75,14 +84,34 @@ func clusterInfo(ctx context.Context, f kube.Factory, in clusterInfoIn) (any, er
 		return nil, err
 	}
 	groups, err := c.APIGroups(ctx)
-	if err != nil {
+	switch {
+	case err == nil:
+		out.APIGroups = groupFlags(groups)
+	case ctx.Err() != nil:
 		return nil, err
+	default:
+		out.APIGroupsNote = "cannot read API groups: " + errClass(err)
 	}
-	out.APIGroups = groupFlags(groups)
-	if out.Nodes, err = summariseNodes(ctx, c); err != nil {
+	out.Nodes, err = summariseNodes(ctx, c)
+	switch {
+	case err == nil:
+	case errors.Is(err, kube.ErrForbidden), errors.Is(err, kube.ErrTimeout), errors.Is(err, kube.ErrUnreachable):
+		out.Nodes = nodeSummary{NotReady: []string{}}
+		out.NodesNote = "cannot list nodes: " + errClass(err)
+	default:
 		return nil, err
 	}
 	return out, nil
+}
+
+// errClass is a fixed, server-authored description of err's class.
+func errClass(err error) string {
+	for _, s := range []error{kube.ErrForbidden, kube.ErrTimeout, kube.ErrUnreachable, kube.ErrUnauthorized} {
+		if errors.Is(err, s) {
+			return s.Error()
+		}
+	}
+	return "request failed"
 }
 
 func groupFlags(groupVersions []string) apiGroupFlags {
@@ -128,7 +157,7 @@ func summariseNodes(ctx context.Context, c kube.Client) (nodeSummary, error) {
 			break
 		}
 		if page == maxNodePages-1 {
-			sum.Truncated = true // more nodes exist than were counted
+			sum.TotalIsLowerBound = true // more nodes exist than were counted
 		}
 		opts.Continue = lr.Continue
 	}

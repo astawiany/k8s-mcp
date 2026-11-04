@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,11 +25,15 @@ type clusterInfoOut struct {
 	Context       string `json:"context"`
 	ServerVersion string `json:"serverVersion"`
 	Nodes         struct {
-		Total    int      `json:"total"`
-		Ready    int      `json:"ready"`
-		NotReady []string `json:"notReady"`
+		Total     int      `json:"total"`
+		Ready     int      `json:"ready"`
+		NotReady  []string `json:"notReady"`
+		Truncated bool     `json:"truncated"`
 	} `json:"nodes"`
-	APIGroups struct {
+	NodesNote         string `json:"nodesNote"`
+	APIGroupsNote     string `json:"apiGroupsNote"`
+	TotalIsLowerBound bool   `json:"totalIsLowerBound"`
+	APIGroups         struct {
 		Metrics    bool `json:"metrics"`
 		Flux       bool `json:"flux"`
 		GatewayAPI bool `json:"gatewayAPI"`
@@ -83,5 +88,67 @@ func TestClusterInfoNodeNameIsWrapped(t *testing.T) {
 	body := servertest.Payload(t, res)
 	if strings.ContainsAny(body, "\x1b\u202e") {
 		t.Errorf("control characters leaked: %q", body)
+	}
+}
+
+func TestClusterInfoNodesForbiddenDegrades(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"forbidden", kube.ErrForbidden}, {"timeout", kube.ErrTimeout}, {"unreachable", kube.ErrUnreachable}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := kube.NewFakeClient(node("n1", "True")).SetServerVersion("v1.30.1").
+				SetAPIGroups("v1", "metrics.k8s.io/v1beta1").
+				FailOn("List", "nodes", kube.NewAPIError(tc.err, "list", "nodes", "", "", "nope"))
+			var out clusterInfoOut
+			decode(t, callTool(t, kube.SingleFakeFactory(fc), "cluster_info", nil), &out)
+			if out.ServerVersion != "v1.30.1" || !out.APIGroups.Metrics {
+				t.Errorf("lost data: %+v", out)
+			}
+			if out.NodesNote == "" || out.Nodes.Total != 0 {
+				t.Errorf("want nodesNote and empty nodes: %+v", out)
+			}
+		})
+	}
+}
+
+func TestClusterInfoAPIGroupsFailureDegrades(t *testing.T) {
+	fc := kube.NewFakeClient(node("n1", "True")).SetServerVersion("v1.30.1").
+		FailOn("APIGroups", "", kube.NewAPIError(kube.ErrForbidden, "get", "apigroups", "", "", "nope"))
+	var out clusterInfoOut
+	decode(t, callTool(t, kube.SingleFakeFactory(fc), "cluster_info", nil), &out)
+	if out.APIGroupsNote == "" || out.ServerVersion != "v1.30.1" || out.Nodes.Total != 1 {
+		t.Errorf("got %+v", out)
+	}
+}
+
+func TestClusterInfoServerVersionFailureIsHardError(t *testing.T) {
+	fc := kube.NewFakeClient().FailOn("ServerVersion", "", kube.NewAPIError(kube.ErrUnreachable, "get", "version", "", "", "down"))
+	if res := callTool(t, kube.SingleFakeFactory(fc), "cluster_info", nil); !res.IsError {
+		t.Fatal("want tool error")
+	}
+}
+
+func TestClusterInfoCapsNotReadyNames(t *testing.T) {
+	var nodes []map[string]any
+	for i := 0; i < 201; i++ {
+		nodes = append(nodes, node(fmt.Sprintf("n%03d", i), "False"))
+	}
+	var out clusterInfoOut
+	decode(t, callTool(t, kube.SingleFakeFactory(kube.NewFakeClient(nodes...)), "cluster_info", nil), &out)
+	if out.Nodes.Total != 201 || len(out.Nodes.NotReady) != 200 || !out.Nodes.Truncated {
+		t.Errorf("total=%d names=%d truncated=%v", out.Nodes.Total, len(out.Nodes.NotReady), out.Nodes.Truncated)
+	}
+}
+
+func TestClusterInfoTotalIsLowerBoundAtPageCap(t *testing.T) {
+	var nodes []map[string]any
+	for i := 0; i < 10001; i++ {
+		nodes = append(nodes, node(fmt.Sprintf("n%05d", i), "True"))
+	}
+	var out clusterInfoOut
+	decode(t, callTool(t, kube.SingleFakeFactory(kube.NewFakeClient(nodes...)), "cluster_info", nil), &out)
+	if out.Nodes.Total != 10000 || !out.TotalIsLowerBound {
+		t.Errorf("total=%d lowerBound=%v", out.Nodes.Total, out.TotalIsLowerBound)
 	}
 }
