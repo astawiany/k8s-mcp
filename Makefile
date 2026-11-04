@@ -1,7 +1,7 @@
 include versions.env
 export
 
-.PHONY: build lint test vuln
+.PHONY: build lint test vuln integration
 .DEFAULT_GOAL := test
 
 # VERSION is stamped into the binary with -ldflags "-X main.version=..."
@@ -24,3 +24,9 @@ test:
 
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+# kind integration tests (Docker, kind, kubectl, curl required): creates the
+# throwaway cluster k8s-mcp-it, runs test/integration with -tags integration
+# and always deletes the cluster. See test/integration/run.sh.
+integration:
+	test/integration/run.sh

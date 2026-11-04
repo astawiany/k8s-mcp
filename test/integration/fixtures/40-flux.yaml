@@ -1,0 +1,59 @@
+---
+# Flux objects for flux_status, for the controllers run.sh installs (Flux
+# v2.2.3: source v1 / v1beta2, kustomize v1, helm v2beta2). Nothing here can
+# succeed: every source points at 127.0.0.1:1, where nothing listens.
+#
+# The GitRepository URL carries a password in its userinfo. Flux echoes
+# URLs in its errors; the password must never appear in any tool output.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: unreachable
+  namespace: broken
+spec:
+  interval: 1m
+  timeout: 5s
+  url: https://deploy:s3cr3tpass-k8smcp@127.0.0.1:1/org/repo.git
+  ref:
+    branch: main
+---
+# Suspended: kustomize-controller never reconciles it.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: suspended
+  namespace: broken
+spec:
+  suspend: true
+  interval: 10m
+  path: ./deploy
+  prune: false
+  sourceRef:
+    kind: GitRepository
+    name: unreachable
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: HelmRepository
+metadata:
+  name: unreachable-charts
+  namespace: broken
+spec:
+  interval: 1m
+  timeout: 5s
+  url: http://127.0.0.1:1/charts
+---
+# The chart cannot be fetched, so the release never becomes Ready.
+apiVersion: helm.toolkit.fluxcd.io/v2beta2
+kind: HelmRelease
+metadata:
+  name: failing
+  namespace: broken
+spec:
+  interval: 1m
+  chart:
+    spec:
+      chart: does-not-exist
+      version: "1.0.0"
+      sourceRef:
+        kind: HelmRepository
+        name: unreachable-charts

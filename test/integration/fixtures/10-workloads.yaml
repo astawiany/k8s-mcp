@@ -1,0 +1,153 @@
+---
+# Broken (and one healthy) workloads for the integration tests. Each
+# Deployment has one replica and fails in exactly one way; workload_health
+# must name the cause. @BUSYBOX_IMAGE@ is replaced by run.sh with the pinned
+# image from versions.env.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: broken
+---
+# The container exits 1 on every start: CrashLoopBackOff.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crashloop
+  namespace: broken
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: crashloop}
+  template:
+    metadata:
+      labels: {app: crashloop}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: "@BUSYBOX_IMAGE@"
+          command: ["sh", "-c", "echo 'starting'; echo 'fatal: config not found' >&2; exit 1"]
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {memory: 32Mi}
+---
+# dd allocates a 64 MiB buffer and fills it, over the 16 MiB limit: OOMKilled.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oomkilled
+  namespace: broken
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: oomkilled}
+  template:
+    metadata:
+      labels: {app: oomkilled}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: "@BUSYBOX_IMAGE@"
+          command: ["dd", "if=/dev/zero", "of=/dev/null", "bs=64M", "count=1"]
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {memory: 16Mi}
+---
+# A tag that does not exist: ErrImagePull / ImagePullBackOff.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imagepull
+  namespace: broken
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: imagepull}
+  template:
+    metadata:
+      labels: {app: imagepull}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:0.0.0-k8s-mcp-does-not-exist
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+---
+# Requests more CPU than any node has: Pending, Unschedulable.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unschedulable
+  namespace: broken
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: unschedulable}
+  template:
+    metadata:
+      labels: {app: unschedulable}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: "@BUSYBOX_IMAGE@"
+          command: ["sleep", "3600"]
+          resources:
+            requests: {cpu: "1000", memory: 8Mi}
+---
+# Runs fine, but the readiness probe always fails: Running, not Ready.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: failing-readiness
+  namespace: broken
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: failing-readiness}
+  template:
+    metadata:
+      labels: {app: failing-readiness}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: "@BUSYBOX_IMAGE@"
+          command: ["sleep", "3600"]
+          readinessProbe:
+            exec:
+              command: ["false"]
+            periodSeconds: 2
+            failureThreshold: 1
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {memory: 32Mi}
+---
+# The control: Running and Ready.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: healthy
+  namespace: broken
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: healthy}
+  template:
+    metadata:
+      labels: {app: healthy}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: app
+          image: "@BUSYBOX_IMAGE@"
+          command: ["sleep", "3600"]
+          readinessProbe:
+            exec:
+              command: ["true"]
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {memory: 32Mi}

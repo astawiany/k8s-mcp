@@ -1,0 +1,36 @@
+---
+# A namespace-scoped identity: it may read pods (and their logs) in
+# namespace broken and nothing else. cluster_info must still return the
+# server version, with nodesNote set because nodes cannot be listed.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ns-reader
+  namespace: broken
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ns-reader
+  namespace: broken
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ns-reader
+  namespace: broken
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ns-reader
+subjects:
+  - kind: ServiceAccount
+    name: ns-reader
+    namespace: broken
