@@ -391,3 +391,84 @@ func TestWorkloadHealthRedactsTokenInWaitingMessage(t *testing.T) {
 		t.Errorf("token in findings: %+v", out.Findings)
 	}
 }
+
+// A container that keeps crashing is reported in every phase of the
+// restart cycle, not only while it waits in CrashLoopBackOff.
+func TestWorkloadHealthRestartingRepeatedly(t *testing.T) {
+	findingsFor := func(cs map[string]any, phase string) hOut {
+		t.Helper()
+		p := hPod("p", "web-1", phase, false, nil, nil)
+		cs["name"] = "app"
+		cs["ready"] = false
+		setStatuses(p, "containerStatuses", cs)
+		return health(t, hDeploy(1, 0), hRS("web-1", 1), p)
+	}
+	countRestarting := func(out hOut) int {
+		n := 0
+		for _, f := range out.Findings {
+			if strings.Contains(f.Summary, "restarting repeatedly") {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("running after a crash", func(t *testing.T) {
+		out := findingsFor(map[string]any{"restartCount": 3, "state": map[string]any{"running": map[string]any{}},
+			"lastState": terminated("Error", 1, "2026-11-04T10:00:00Z")}, "Running")
+		wantFinding(t, out, "critical", "pod/p/lastState", "container app is restarting repeatedly: 3 restarts, last exit code 1 (Error)")
+	})
+	t.Run("terminated between restarts", func(t *testing.T) {
+		out := findingsFor(map[string]any{"restartCount": 2, "state": terminated("Error", 1, "2026-11-04T10:01:00Z"),
+			"lastState": terminated("Error", 1, "2026-11-04T10:00:00Z")}, "Running")
+		wantFinding(t, out, "critical", "pod/p/lastState", "container app is restarting repeatedly: 2 restarts, last exit code 1 (Error)")
+		for _, f := range out.Findings {
+			if strings.Contains(f.Summary, "terminated with exit code") {
+				t.Errorf("duplicate plain termination finding: %+v", out.Findings)
+			}
+		}
+	})
+	t.Run("waiting other than CrashLoopBackOff", func(t *testing.T) {
+		out := findingsFor(map[string]any{"restartCount": 4, "state": map[string]any{"waiting": map[string]any{"reason": "ContainerCreating"}},
+			"lastState": terminated("Error", 2, "2026-11-04T10:00:00Z")}, "Running")
+		wantFinding(t, out, "critical", "pod/p/lastState", "restarting repeatedly: 4 restarts, last exit code 2 (Error)")
+	})
+	t.Run("CrashLoopBackOff keeps its own finding only", func(t *testing.T) {
+		out := findingsFor(map[string]any{"restartCount": 5, "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}},
+			"lastState": terminated("Error", 1, "2026-11-04T10:00:00Z")}, "Running")
+		wantFinding(t, out, "critical", "pod/p/lastState", "CrashLoopBackOff", "5 restarts", "exit code 1")
+		if n := countRestarting(out); n != 0 {
+			t.Errorf("CrashLoopBackOff also got %d restarting findings: %+v", n, out.Findings)
+		}
+	})
+	t.Run("restarts with exit 0", func(t *testing.T) {
+		out := findingsFor(map[string]any{"restartCount": 3, "state": map[string]any{"running": map[string]any{}},
+			"lastState": terminated("Completed", 0, "2026-11-04T10:00:00Z")}, "Running")
+		if n := countRestarting(out); n != 0 {
+			t.Errorf("exit 0 restarts reported as crashing: %+v", out.Findings)
+		}
+		for _, f := range out.Findings {
+			if f.Severity == "critical" {
+				t.Errorf("critical finding for clean restarts: %+v", f)
+			}
+		}
+	})
+	t.Run("OOMKilled keeps its own finding without duplicate", func(t *testing.T) {
+		out := findingsFor(map[string]any{"restartCount": 3, "state": map[string]any{"running": map[string]any{}},
+			"lastState": terminated("OOMKilled", 137, "2026-11-04T10:00:00Z")}, "Running")
+		wantFinding(t, out, "critical", "pod/p/lastState", "OOMKilled", "128Mi")
+		if n := countRestarting(out); n != 0 {
+			t.Errorf("OOMKilled also got %d restarting findings: %+v", n, out.Findings)
+		}
+		if len(out.Findings) != 1 {
+			t.Errorf("want exactly the OOMKilled finding, got %+v", out.Findings)
+		}
+	})
+	t.Run("first termination without restarts keeps the plain wording", func(t *testing.T) {
+		out := findingsFor(map[string]any{"restartCount": 0, "state": terminated("Error", 1, "2026-11-04T10:00:00Z")}, "Failed")
+		wantFinding(t, out, "critical", "pod/p/lastState", "terminated with exit code 1 (Error)")
+		if n := countRestarting(out); n != 0 {
+			t.Errorf("%+v", out.Findings)
+		}
+	})
+}

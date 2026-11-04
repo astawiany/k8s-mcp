@@ -472,13 +472,19 @@ func analyzePod(p map[string]any) podInfo {
 		case configErrors[reason]:
 			add("critical", fmt.Sprintf("pod %s container %s: %s: %s", name, label, reason, msg), "status")
 		}
-		if term != nil && term.Reason == "OOMKilled" {
+		switch {
+		case term != nil && term.Reason == "OOMKilled":
 			lim := "no memory limit set"
 			if l := memoryLimit(p, cname); l != "" {
 				lim = "memory limit " + l
 			}
 			add("critical", fmt.Sprintf("pod %s container %s was OOMKilled (exit code %d), %s, %d restarts", name, label, term.ExitCode, lim, restarts), evid)
-		} else if curTerm != nil && term.ExitCode != 0 {
+		case term != nil && term.ExitCode != 0 && restarts > 0 && reason != "CrashLoopBackOff":
+			// A crash loop seen between back-offs: running again, terminated
+			// again, or being recreated. CrashLoopBackOff already has its
+			// own finding with the same facts.
+			add("critical", fmt.Sprintf("pod %s container %s is restarting repeatedly: %d restarts, last exit code %d (%s)", name, label, restarts, term.ExitCode, term.Reason), evid)
+		case curTerm != nil && term.ExitCode != 0:
 			add("critical", fmt.Sprintf("pod %s container %s terminated with exit code %d (%s)", name, label, term.ExitCode, term.Reason), evid)
 		}
 		if run, _ := nested(cs, "state", "running").(map[string]any); run != nil {
