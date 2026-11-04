@@ -626,16 +626,18 @@ func TestSecretManifestFailClosed(t *testing.T) {
 	}
 	big := strings.Repeat("y", 5<<20)
 	cases := map[string]any{
-		"ESC prefix":                 cm("\x1b" + js),
-		"ESC [ prefix":               cm("\x1b[" + js),
-		"OSC prefix":                 cm("\x1b]0;" + js),
-		"C1 CSI prefix":              cm("\u009b" + js),
-		"escaped invisible in kind":  cm(`{"apiVersion":"v1","kind":"Sec\u200bret","data":{"password":"` + leak + `"}}`),
-		"escaped invisible in key":   cm(`{"apiVersion":"v1","ki\u200bnd":"Secret","data":{"password":"` + leak + `"}}`),
-		"5 MiB pad after the Secret": cm(`{"apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"},"pad":"` + big + `"}`),
-		"5 MiB pad before":           cm(`{"pad":"` + big + `","apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"}}`),
-		"manifest in a log line":     map[string]any{"log": "applying " + js + "\nERROR done"},
-		"YAML in ConfigMap data":     map[string]any{"kind": "ConfigMap", "data": map[string]any{"s.yaml": "apiVersion: v1\nkind: Secret\ndata:\n  password: " + leak + "\n"}},
+		"ESC prefix":                                   cm("\x1b" + js),
+		"ESC [ prefix":                                 cm("\x1b[" + js),
+		"OSC prefix":                                   cm("\x1b]0;" + js),
+		"C1 CSI prefix":                                cm("\u009b" + js),
+		"escaped invisible in kind":                    cm(`{"apiVersion":"v1","kind":"Sec\u200bret","data":{"password":"` + leak + `"}}`),
+		"escaped invisible in key":                     cm(`{"apiVersion":"v1","ki\u200bnd":"Secret","data":{"password":"` + leak + `"}}`),
+		"5 MiB pad after the Secret":                   cm(`{"apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"},"pad":"` + big + `"}`),
+		"5 MiB pad before":                             cm(`{"pad":"` + big + `","apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"}}`),
+		"manifest in a log line":                       map[string]any{"log": "applying " + js + "\nERROR done"},
+		"YAML in ConfigMap data":                       map[string]any{"kind": "ConfigMap", "data": map[string]any{"s.yaml": "apiVersion: v1\nkind: Secret\ndata:\n  password: " + leak + "\n"}},
+		"double-escaped JSON in a structured log line": map[string]any{"log": `{"level":"info","obj":"{\"kind\":\"Secret\",\"data\":{\"password\":\"` + leak + `\"}}"}`},
+		"coloured YAML in a log":                       map[string]any{"log": "kind: Secret\n\x1b[34mdata\x1b[0m:\n  password: " + leak + "\n"},
 	}
 	for name, v := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -658,6 +660,34 @@ func TestSecretManifestNoFalsePositives(t *testing.T) {
 				"annotations": map[string]any{"a/b": v}}})
 			if !strings.Contains(body, v) {
 				t.Errorf("normal text changed: %s", body)
+			}
+		})
+	}
+}
+
+// Multi-line text that mentions Secrets and has "metadata:" (which contains
+// "data:") but holds no Secret data is returned unchanged.
+func TestSecretManifestNoFalsePositivesMultiLine(t *testing.T) {
+	deploy := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n" +
+		"    spec:\n      containers:\n      - name: web\n        env:\n        - name: DB_PASSWORD\n" +
+		"          valueFrom:\n            secretKeyRef:\n              name: db\n              key: password\n" +
+		"      volumes:\n      - name: tls\n        secret:\n          secretName: web-tls\n"
+	podLog := "2026-11-04T10:00:00Z applying kind: Deployment\n  metadata:\n    name: web\n" +
+		"2026-11-04T10:00:01Z ran kubectl get secret db -o name\n2026-11-04T10:00:02Z done\n"
+	for name, v := range map[string]any{
+		"Deployment YAML in ConfigMap data": map[string]any{"kind": "ConfigMap", "data": map[string]any{"deploy.yaml": deploy}},
+		"pod log":                           map[string]any{"log": podLog},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := payload(t, v)
+			var tree any
+			if err := json.Unmarshal([]byte(body), &tree); err != nil {
+				t.Fatalf("payload is not JSON: %v", err)
+			}
+			found := false
+			walkStrings(tree, func(s string) { found = found || s == deploy || s == podLog })
+			if !found {
+				t.Errorf("text changed: %s", body)
 			}
 		})
 	}

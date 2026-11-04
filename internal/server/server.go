@@ -37,7 +37,8 @@
 // A handler error, or a panic, becomes an IsError result whose text comes
 // from errorText: only fixed server-authored sentences (error class, hint)
 // stay outside; the error's own text, which may quote the cluster, is
-// sanitised, capped and placed in a data envelope.
+// sanitised, replaced by redact.Redacted if it holds a token shape or
+// redact.LooksLikeSecretManifest, capped and placed in a data envelope.
 //
 // Sessions stay inside Run: the server never hands out an *mcp.ServerSession,
 // whose Log and CreateMessage would reach the client outside the wrapper.

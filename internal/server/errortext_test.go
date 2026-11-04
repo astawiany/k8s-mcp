@@ -98,3 +98,11 @@ func TestErrorTextClusterDetailOnlyInEnvelope(t *testing.T) {
 		}
 	}
 }
+
+func TestErrorTextHidesSecretManifest(t *testing.T) {
+	const leak = "PLANTEDPW78"
+	err := fmt.Errorf("decode: %w", errors.New("bad object: kind: Secret\ndata:\n  password: "+leak))
+	if got := errorText(err); strings.Contains(got, leak) {
+		t.Errorf("Secret value leaked in error text:\n%s", got)
+	}
+}

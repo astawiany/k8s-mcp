@@ -598,3 +598,91 @@ func TestObjectSecretKindWithRawInvisibles(t *testing.T) {
 		t.Errorf("leaked: %s", b)
 	}
 }
+
+// deployYAML is a Deployment that mounts a Secret and reads one key of it:
+// it has "secret", "kind" and "metadata:" but no Secret data.
+const deployYAML = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n" +
+	"  template:\n    metadata:\n      labels:\n        app: web\n    spec:\n      containers:\n" +
+	"      - name: web\n        env:\n        - name: DB_PASSWORD\n          valueFrom:\n" +
+	"            secretKeyRef:\n              name: db\n              key: password\n" +
+	"      volumes:\n      - name: tls\n        secret:\n          secretName: web-tls\n"
+
+func TestLooksLikeSecretManifestFixRound4(t *testing.T) {
+	yes := map[string]string{
+		// A: JSON inside a JSON string (structured log line), escaped once and twice.
+		"double-escaped JSON": `{"level":"info","obj":"{\"kind\":\"Secret\",\"data\":{\"password\":\"x\"}}"}`,
+		"triple-escaped JSON": `{"a":"{\"obj\":\"{\\\"kind\\\":\\\"Secret\\\",\\\"data\\\":{}}\"}"}`,
+		"escaped YAML":        `{"msg":"apiVersion: v1\nkind: Secret\ndata:\n  password: eA=="}`,
+		"escaped letters":     `{"kind":"\u0053ecret","\u0064ata":{"p":"x"}}`,
+		// B: the forms that must still match with the word boundary.
+		"YAML data":          "apiVersion: v1\nkind: Secret\ndata:\n  password: eA==\n",
+		"YAML DATA":          "APIVERSION: V1\nKIND: SECRET\nDATA:\n  PASSWORD: EA==\n",
+		"YAML stringData":    "kind: Secret\nstringData:\n  password: x\n",
+		"JSON stringData":    `{"kind":"Secret","stringData":{"p":"x"}}`,
+		"JSON spaced":        `{ "kind" : "Secret" , "data" : { "p" : "x" } }`,
+		"flow YAML":          "{kind: Secret, data: {password: x}}",
+		"CRLF YAML":          "kind: Secret\r\ndata:\r\n  password: x\r\n",
+		"cut at data":        "data:\n  password: x\n...kind: Secret",
+		"coloured key":       "kind: Secret\n\x1b[34mdata\x1b[0m:\n  password: x\n",
+		"SGR before key":     "kind: Secret\n\x1b[32mdata:\n  password: x\n",
+		"CSI eats the d":     "kind: Secret\n\x1b[data:\n  password: x\n",
+		"SGR inside kind":    "kind: Sec\x1b[0mret\ndata:\n  password: x\n",
+		"zero-width in data": "kind: Secret\nda\u200bta:\n  password: x\n",
+	}
+	no := map[string]string{
+		"Deployment YAML":         deployYAML,
+		"Deployment JSON":         `{"kind":"Deployment","metadata":{"name":"w"},"spec":{"volumes":[{"secret":{"secretName":"s"}}]}}`,
+		"pod log with get secret": "2026-11-04T10:00:00Z applying kind: Deployment\n  metadata:\n    name: web\n2026-11-04T10:00:01Z ran kubectl get secret db -o name\n",
+		"userdata key":            "kind: Secret mentioned\nuserdata: none\nmy_data: none\napp-data: none\n",
+	}
+	for name, s := range yes {
+		if !LooksLikeSecretManifest(s) {
+			t.Errorf("%s: LooksLikeSecretManifest(%q) = false, want true", name, s)
+		}
+	}
+	for name, s := range no {
+		if LooksLikeSecretManifest(s) {
+			t.Errorf("%s: LooksLikeSecretManifest(%q) = true, want false", name, s)
+		}
+	}
+}
+
+// A parseable JSON annotation whose string field holds a Secret manifest
+// (escaped JSON or YAML) is not a Secret map, so the field-by-field scrub
+// alone would keep it.
+func TestObjectAnnotationJSONStringHoldsSecretManifest(t *testing.T) {
+	const leak = "LEAKEDPW45"
+	for name, v := range map[string]string{
+		"escaped JSON":        `{"note":"{\"kind\":\"Secret\",\"data\":{\"password\":\"` + leak + `\"}}"}`,
+		"YAML in a string":    `{"note":"kind: Secret\ndata:\n  password: ` + leak + `\n"}`,
+		"in a list":           `[{"x":["ok","{\"kind\":\"Secret\",\"data\":{\"p\":\"` + leak + `\"}}"]}]`,
+		"last-applied string": `{"kind":"ConfigMap","data":{"s.yaml":"kind: Secret\nstringData:\n  p: ` + leak + `\n"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			key := "a/b"
+			if name == "last-applied string" {
+				key = lastAppliedAnnotation
+			}
+			o := map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
+				"annotations": map[string]any{key: v}}}
+			b, _ := json.Marshal(Object(o))
+			if strings.Contains(string(b), leak) {
+				t.Errorf("leaked: %s", b)
+			}
+			if !strings.Contains(string(b), RedactedSecretManifest) {
+				t.Errorf("no %q marker: %s", RedactedSecretManifest, b)
+			}
+		})
+	}
+}
+
+func TestObjectAnnotationDeploymentYAMLUntouched(t *testing.T) {
+	js, _ := json.Marshal(map[string]any{"note": deployYAML})
+	for _, v := range []string{deployYAML, string(js)} {
+		o := map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
+			"annotations": map[string]any{"a/b": v}}}
+		if got := Object(o)["metadata"].(map[string]any)["annotations"].(map[string]any)["a/b"]; got != v {
+			t.Errorf("annotation changed:\n got %q\nwant %q", got, v)
+		}
+	}
+}

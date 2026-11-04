@@ -132,10 +132,10 @@ func mapTree(v any, f func(string) string) any {
 
 // sanitizeString is the first string pass: Secret-manifest check
 // (redact.LooksLikeSecretManifest, whole string replaced), token-shape
-// redaction of the raw string, a guard cut at preCut, untrusted.Sanitize, and token-shape
-// redaction again (tokens hidden by invisible characters only match after
-// Sanitize). Both token checks see the whole string, before the per-string
-// cap, so a token split by a later cut still hides the value.
+// redaction of the raw string, a guard cut at preCut, untrusted.Sanitize,
+// and token-shape redaction again (tokens hidden by invisible characters
+// only match after Sanitize). Both token checks see the whole string, before
+// the per-string cap, so a token split by a later cut still hides the value.
 func sanitizeString(str string) string {
 	if str == "" {
 		return str
@@ -208,8 +208,9 @@ func errorResult(err error) *mcp.CallToolResult {
 // sentinel, or "the tool failed") and a hint. Everything else, including
 // verbs, resources, names, namespaces, kind suggestions, API server messages
 // and the text of any wrapped error, is the detail: err.Error(), sanitised,
-// token-checked, capped and placed in a data envelope. The whole text is at
-// most MaxBytes.
+// token-checked (all of it becomes Redacted on a token shape or when
+// redact.LooksLikeSecretManifest), capped and placed in a data envelope. The
+// whole text is at most MaxBytes.
 func errorText(err error) string {
 	head := "error: " + summary(err)
 	if h := hint(err); h != "" {
@@ -218,7 +219,7 @@ func errorText(err error) string {
 	head += "\ndetail (untrusted data, may quote the cluster):\n"
 
 	detail := untrusted.Sanitize(err.Error())
-	if redact.EnvValue("", detail) == redact.Redacted {
+	if redact.EnvValue("", detail) == redact.Redacted || redact.LooksLikeSecretManifest(err.Error()) {
 		detail = redact.Redacted
 	}
 	boundary := untrusted.NewBoundary()

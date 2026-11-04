@@ -69,17 +69,25 @@
 //	                            every element of items (lists). Use it for any
 //	                            object returned to a client.
 //
-//	LooksLikeSecretManifest(s)  true when s, ignoring case and with control
-//	                            and format characters removed (raw or as JSON
-//	                            \uXXXX escapes), contains "secret", "kind" and
-//	                            one of "\"data\"", "data:", "stringdata".
-//	                            Broad on purpose: callers replace the whole
-//	                            string with RedactedSecretManifest.
+//	LooksLikeSecretManifest(s)  true when s, JSON-unescaped at any depth,
+//	                            ignoring case and with control, format and
+//	                            ANSI characters removed, contains "secret",
+//	                            "kind" and one of "\"data\"", "data:" or
+//	                            "stringdata" (the last two not preceded by a
+//	                            letter, digit, "_", "-" or ".", so not
+//	                            "metadata:"). Broad on purpose: callers
+//	                            replace the whole string with
+//	                            RedactedSecretManifest. It sees one string at
+//	                            a time, so multi-line text such as a pod log
+//	                            must be passed as ONE string, never as a list
+//	                            of lines.
 //
 // Annotation values (any key) that are not a parseable JSON object or array
 // but LooksLikeSecretManifest are replaced whole by RedactedSecretManifest
 // (fail closed: a cut, prefixed or YAML Secret cannot be scrubbed field by
-// field). Field names and kind values are compared with control and format
+// field); so is any string inside a parseable JSON annotation that
+// LooksLikeSecretManifest (a manifest held as escaped JSON or YAML text).
+// Field names and kind values are compared with control and format
 // characters removed ("ki\u200bnd": "Sec\u200bret" is a Secret), but only
 // where a match makes the scrub stricter: the Secret fields that are kept
 // (apiVersion, kind, metadata, type, immutable) must match exactly.
@@ -88,9 +96,29 @@
 // timestamps, resourceVersion and uid, but every annotation value becomes
 // Redacted (keys kept).
 //
-// Not covered (documented limits): other credential forms in command/args
-// (for example "--password value" inside one shell string), credentials in
-// ConfigMap data, and in annotations that are not JSON.
+// Not covered (documented limits):
+//   - other credential forms in command/args (for example "--password value"
+//     inside one shell string) and credentials in ConfigMap data that are not
+//     a Secret manifest;
+//   - Secret manifests that are base64- or gzip-encoded (for example Helm
+//     release storage in a ConfigMap or Secret, or Tiller ConfigMaps);
+//   - a manifest split across separate strings or list items (callers must
+//     return multi-line text such as pod logs as one string) and lines
+//     without their context (a "password: x" line with no kind and no
+//     "data:" in the same string);
+//   - registry credentials (.dockerconfigjson "auths"/"auth") or other
+//     credentials in ConfigMap or annotation JSON that do not contain the
+//     words above, unless EnvValue's token shapes match;
+//   - YAML "data :" (space before the colon), a single-quoted 'data' key,
+//     HTML-entity escaping (&quot;data&quot;), and look-alike letters such
+//     as fullwidth forms (U+FF41 to U+FF5A) of "secret", "kind" or "data".
+//
+// False positives (whole string hidden though it holds no Secret): any one
+// string with "secret" and "kind" anywhere (including "secretName",
+// "secretKeyRef", "kindly") plus a JSON "data" key, a "data:" key or
+// "stringData" as above. Examples: a multi-document YAML or Helm template
+// with a ConfigMap and a Deployment that mounts a Secret; a structured log
+// line with a "data" field that mentions a Secret and a kind.
 package redact
 
 import (
@@ -104,6 +132,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/astawiany/k8s-mcp/internal/untrusted"
 )
 
 // Redacted replaces every hidden value.
@@ -334,6 +364,7 @@ func scrubJSONString(v any, strict bool) any {
 	orig := deepCopy(parsed)
 	scrubTree(parsed, false)
 	maskWorkloadAny(parsed)
+	parsed = failClosedStrings(parsed)
 	if !strict && reflect.DeepEqual(orig, parsed) {
 		return v
 	}
@@ -342,6 +373,28 @@ func scrubJSONString(v any, strict bool) any {
 		return Redacted
 	}
 	return string(b)
+}
+
+// failClosedStrings replaces, in a parsed annotation, every string value
+// that LooksLikeSecretManifest with RedactedSecretManifest: a manifest held
+// as text inside the JSON (escaped JSON, YAML) is not a Secret map, so
+// scrubTree does not see it.
+func failClosedStrings(v any) any {
+	switch t := v.(type) {
+	case string:
+		if LooksLikeSecretManifest(t) {
+			return RedactedSecretManifest
+		}
+	case map[string]any:
+		for k, e := range t {
+			t[k] = failClosedStrings(e)
+		}
+	case []any:
+		for i, e := range t {
+			t[i] = failClosedStrings(e)
+		}
+	}
+	return v
 }
 
 // podSpecPaths are the locations of pod specs in workload objects.
@@ -567,15 +620,52 @@ func unparsable(s string) any {
 }
 
 // LooksLikeSecretManifest reports whether s may hold a Secret manifest (JSON
-// or YAML, whole or cut): after removing control and format (Cf) characters,
-// raw or written as JSON \uXXXX escapes (surrogate pairs included), and
-// ignoring case, s contains "secret", "kind", and one of "\"data\"",
-// "data:" or "stringdata". It is deliberately broad (fail closed): callers
-// replace such a string whole. Time is linear in len(s).
+// or YAML, whole or cut). s is first unescaped: JSON escapes, at any depth of
+// escaping (a run of backslashes counts as one), are decoded, so that a
+// manifest inside a JSON string inside a log line is seen. The result is
+// then checked twice, raw and after untrusted.Sanitize (what a client sees),
+// each time lower-cased with line breaks kept and other control and format
+// characters removed. It is true when one of them contains "secret", "kind"
+// and one of: "\"data\"", "data:" or "stringdata" with neither a letter,
+// digit, "_", "-" nor "." just before it (so "metadata:" does not count).
+// It is deliberately broad (fail closed): callers replace such a string
+// whole. Time is linear in len(s).
+//
+// It sees one string at a time: a manifest split across separate strings
+// (for example a log returned as a list of lines) is not found, so callers
+// must pass multi-line text such as pod logs as one string.
 func LooksLikeSecretManifest(s string) bool {
-	n := normManifest(s)
+	d := unescapeJSON(s)
+	if manifestWords(normManifest(d)) {
+		return true
+	}
+	// ANSI sequences: "Sec\x1b[0mret" reads "Secret" once sanitised.
+	if strings.IndexFunc(d, func(r rune) bool { return r == 0x1b || (r >= 0x80 && r <= 0x9f) }) >= 0 {
+		return manifestWords(normManifest(untrusted.Sanitize(d)))
+	}
+	return false
+}
+
+func manifestWords(n string) bool {
 	return strings.Contains(n, "secret") && strings.Contains(n, "kind") &&
-		(strings.Contains(n, `"data"`) || strings.Contains(n, "data:") || strings.Contains(n, "stringdata"))
+		(strings.Contains(n, `"data"`) || hasWord(n, "data:") || hasWord(n, "stringdata"))
+}
+
+// hasWord reports whether w occurs in n with no word character just before
+// it.
+func hasWord(n, w string) bool {
+	for off := 0; ; {
+		i := strings.Index(n[off:], w)
+		if i < 0 {
+			return false
+		}
+		i += off
+		r, _ := utf8.DecodeLastRuneInString(n[:i])
+		if i == 0 || !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.') {
+			return true
+		}
+		off = i + 1
+	}
 }
 
 // invisibleRune reports control and format characters, which can hide or
@@ -599,50 +689,94 @@ func normKey(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
-// normManifest lower-cases s and drops invisible runes, raw or as JSON
-// \uXXXX escapes.
+// normManifest lower-cases s, turns line breaks into "\n" and tabs into
+// spaces, and drops every other control or format character.
 func normManifest(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\v', '\f', 0x85, 0x2028, 0x2029:
+			return '\n'
+		case '\t':
+			return ' '
+		}
+		if invisibleRune(r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, s)
+}
+
+// unescapeJSON decodes JSON string escapes in s for matching only. A run of
+// backslashes is one escape, so text escaped several times decodes in one
+// pass: \uXXXX (and surrogate pairs) become the rune, n and r a line break,
+// t a tab, b and f are dropped, and before any other character (such as a
+// quote) the backslashes are dropped.
+func unescapeJSON(s string) string {
+	if strings.IndexByte(s, '\\') < 0 {
+		return s
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
-		if s[i] == '\\' {
-			if r, w := jsonEscape(s[i:]); w > 0 {
-				if !invisibleRune(r) {
-					b.WriteString(strings.ToLower(s[i : i+w]))
-				}
-				i += w
-				continue
-			}
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			i++
+			continue
 		}
-		r, w := utf8.DecodeRuneInString(s[i:])
-		if !invisibleRune(r) {
-			b.WriteRune(unicode.ToLower(r))
+		j := skipBackslashes(s, i)
+		if j == len(s) {
+			break
 		}
-		i += w
+		if r, end := hexEscape(s, j); end > 0 {
+			b.WriteRune(r)
+			i = end
+			continue
+		}
+		switch s[j] {
+		case 'n', 'r':
+			b.WriteByte('\n')
+			j++
+		case 't':
+			b.WriteByte('\t')
+			j++
+		case 'b', 'f':
+			j++
+		}
+		i = j
 	}
 	return b.String()
 }
 
-// jsonEscape decodes a \uXXXX escape (or a surrogate pair of them) at the
-// start of s, returning the rune and the bytes used, or w == 0.
-func jsonEscape(s string) (r rune, w int) {
-	hex4 := func(t string) (rune, bool) {
-		if len(t) < 6 || t[0] != '\\' || t[1] != 'u' {
+func skipBackslashes(s string, i int) int {
+	for i < len(s) && s[i] == '\\' {
+		i++
+	}
+	return i
+}
+
+// hexEscape decodes uXXXX at s[j:] (the backslashes already skipped), with a
+// following low surrogate escape if r is a high surrogate. It returns the
+// rune and the index after the escape, or end == 0.
+func hexEscape(s string, j int) (r rune, end int) {
+	hex4 := func(j int) (rune, bool) {
+		if j+5 > len(s) || s[j] != 'u' {
 			return 0, false
 		}
-		v, err := strconv.ParseUint(t[2:6], 16, 32)
+		v, err := strconv.ParseUint(s[j+1:j+5], 16, 32)
 		return rune(v), err == nil
 	}
-	r1, ok := hex4(s)
+	r1, ok := hex4(j)
 	if !ok {
 		return 0, 0
 	}
 	if utf16.IsSurrogate(r1) {
-		if r2, ok := hex4(s[6:]); ok {
-			if d := utf16.DecodeRune(r1, r2); d != utf8.RuneError {
-				return d, 12
+		if k := skipBackslashes(s, j+5); k > j+5 {
+			if r2, ok := hex4(k); ok {
+				if d := utf16.DecodeRune(r1, r2); d != utf8.RuneError {
+					return d, k + 5
+				}
 			}
 		}
 	}
-	return r1, 6
+	return r1, j + 5
 }
