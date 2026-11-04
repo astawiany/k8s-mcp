@@ -49,26 +49,46 @@ phase() {
 # Diagnostics of a failed run (written before the cluster is deleted; CI uploads the directory).
 # Never dumped: Secrets (no `get secret`), kubeconfigs. Every dumped file is then scanned for the
 # known canary, its base64 form, the ServiceAccount tokens minted by sa_kubeconfig and any JWT
-# (eyJ...); a file with a hit is deleted and the run fails loudly.
+# (eyJ...); a file with a hit is deleted and an error is printed. The intentional fake canaries of the
+# log-injection fixture are not scrub patterns (they would flag every failed run); its pod logs are
+# removed from the export instead.
 DIAG_DIR=${IT_DIAG_DIR:-$ROOT/.integration-diagnostics}
 SCRUB_VALUES=(k8smcp-canary-secret-value-7f3a9c2e51d4 azhzbWNwLWNhbmFyeS1zZWNyZXQtdmFsdWUtN2YzYTljMmU1MWQ0)
 dump_diagnostics() {
-	local d=$DIAG_DIR name f v leaked=0
+	local d=$DIAG_DIR name f v leaked=0 pd
 	rm -rf "$d"
 	mkdir -p "$d/flux-logs"
+	# A dead API server must not hang the dump (the main run keeps the plain k).
+	kd() { k --request-timeout=20s "$@"; }
 	echo "== diagnostics -> $d"
 	{
-		k get pods,events -A -o wide
+		kd get pods,events -A -o wide
 	} >"$d/pods-events.txt" 2>&1 || true
-	k get pods -A --no-headers 2>/dev/null | while read -r ns name ready status _; do
+	kd get pods -A --no-headers 2>/dev/null | while read -r ns name ready status _; do
 		# describe pods that are not fully ready or not Running/Completed
 		[[ $status == Completed || ($status == Running && ${ready%%/*} == "${ready##*/}") ]] && continue
-		k -n "$ns" describe pod "$name" >"$d/describe-$ns-$name.txt" 2>&1 || true
+		kd -n "$ns" describe pod "$name" >"$d/describe-$ns-$name.txt" 2>&1 || true
 	done
-	for name in $(k -n flux-system get pods -o name 2>/dev/null); do
-		k -n flux-system logs "$name" --all-containers --tail=200 >"$d/flux-logs/${name#pod/}.log" 2>&1 || true
+	for name in $(kd -n flux-system get pods -o name 2>/dev/null); do
+		kd -n flux-system logs "$name" --all-containers --tail=200 >"$d/flux-logs/${name#pod/}.log" 2>&1 || true
 	done
-	kind export logs "$d/kind" --name "$CLUSTER" >/dev/null 2>&1 || true
+	if command -v timeout >/dev/null 2>&1; then
+		timeout 120 kind export logs "$d/kind" --name "$CLUSTER" >/dev/null 2>&1 || true
+	else
+		kind export logs "$d/kind" --name "$CLUSTER" >/dev/null 2>&1 || true
+	fi
+	# The artifact of a public repository is downloadable by anyone signed in to GitHub, and
+	# /var/log/pods holds the stdout of the fixture pods (including the intentional fake credentials of
+	# the log-injection pod). Keep exported pod logs of the infrastructure namespaces only, and never
+	# those of the log-injection fixture. get/describe output of every namespace is kept.
+	while IFS= read -r -d '' pd; do
+		name=$(basename "$pd")
+		case $name in
+		*log-injection*) rm -rf "$pd" ;;
+		kube-system_* | flux-system_* | local-path-storage_*) ;;
+		*) rm -rf "$pd" ;;
+		esac
+	done < <(find "$d/kind" -type d -path '*/pods/*' -prune -print0 2>/dev/null)
 	while IFS= read -r -d '' f; do
 		for v in "${SCRUB_VALUES[@]}"; do
 			if grep -qF -- "$v" "$f"; then
@@ -93,11 +113,13 @@ cleanup() {
 	local rc=$?
 	trap - EXIT INT TERM
 	if [[ $rc -ne 0 && $created -eq 1 ]]; then
-		dump_diagnostics || rc=1
+		# The original exit code (e.g. 130 after INT, or the failing test's) is kept; a leak is
+		# reported by dump_diagnostics itself (error on stderr, file deleted).
+		dump_diagnostics || true
 	fi
 	phase "delete cluster"
 	if [[ $created -eq 1 ]]; then
-		kind delete cluster --name "$CLUSTER" --kubeconfig "$KC" || rc=1
+		kind delete cluster --name "$CLUSTER" --kubeconfig "$KC" || { [[ $rc -ne 0 ]] || rc=1; }
 	fi
 	rm -rf "$WORK"
 	phase "done"

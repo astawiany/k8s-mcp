@@ -21,6 +21,17 @@ whole workflow, every job has a timeout, and no job reads a secret.
 so an upstream outage or a newly published CVE must not block unrelated merges. It still runs and
 shows red when it finds something; treat that as a to-do, not as noise.
 
+### Failure diagnostics artifact
+
+When `integration` fails, the `integration-diagnostics` artifact contains: `kubectl get pods,events -A`,
+`describe` of the pods that are not ready, the last 200 log lines of the `flux-system` pods and the
+`kind export logs` output reduced to the pod logs of `kube-system`, `flux-system` and
+`local-path-storage` plus node and kubelet logs. Pod logs of every other namespace, in particular the
+`log-injection` fixture with its intentional fake credentials, are deleted from the export; Secrets
+and kubeconfigs are never dumped, and files containing the real canary value, a minted ServiceAccount
+token or any JWT are deleted. For a public repository the artifact is downloadable by anyone signed
+in to GitHub, so treat its content as public. It expires after 7 days (`retention-days: 7`).
+
 Go, kind, kubectl, Trivy and actionlint are installed by `scripts/ci-install-tools.sh` from
 official release archives whose sha256 is pinned in `versions.env` (a mismatch aborts the job).
 The Go version is the `toolchain` line of `go.mod` (a test keeps them equal; the `go` line stays the

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -399,5 +400,80 @@ func TestProtectBranchRulesetsUnavailableIsClearAndWritesNothing(t *testing.T) {
 	}
 	if strings.Contains(e.calls(), "PUT ") || strings.Contains(e.calls(), "POST ") {
 		t.Fatalf("wrote before the ruleset lookup failed:\n%s", e.calls())
+	}
+}
+
+// --- run.sh diagnostics ------------------------------------------------------------------
+
+// runCleanup executes run.sh's dump_diagnostics/cleanup (sliced out of the script) with stub
+// kubectl and kind, as if the script had failed with exit code rc. It returns the diagnostics
+// dir, the script's exit code and its output.
+func runCleanup(t *testing.T, rc int, kubectlOut string) (diag string, code int, out string) {
+	t.Helper()
+	src := readFileT(t, filepath.Join(repoRoot(t), "test", "integration", "run.sh"))
+	from := strings.Index(src, "DIAG_DIR=")
+	to := strings.Index(src, "# poll <timeout-s>")
+	if from < 0 || to < 0 {
+		t.Fatal("cannot slice run.sh")
+	}
+	work, stubs := t.TempDir(), t.TempDir()
+	diag = filepath.Join(work, "diag")
+	writeStub(t, stubs, "kubectl", `case "$*" in *"get pods,events"*) printf '%s\n' "$STUB_KUBECTL_OUT" ;; esac
+`)
+	writeStub(t, stubs, "kind", `if [ "$1 $2" = "export logs" ]; then
+  for p in kube-system_etcd_u1/etcd flux-system_source_u2/manager broken_log-injection_u3/app broken_other_u4/app local-path-storage_prov_u5/p; do
+    mkdir -p "$3/node/pods/${p%%/*}/${p##*/}"
+    echo "stdout of $p ghp_K8sMcpCanaryGithubToken0123456789 -----BEGIN RSA PRIVATE KEY-----" > "$3/node/pods/${p%%/*}/${p##*/}/0.log"
+  done
+  echo journal > "$3/node/kubelet.log"
+fi
+exit 0
+`)
+	script := "set -uo pipefail\nROOT=" + work + "\nCLUSTER=c\nKC=x\nCTX=y\nWORK=" + work + "/w\ncreated=1\nstart=0\ntimings=(x)\nphase() { :; }\nIT_DIAG_DIR=" + diag + "\n" +
+		src[from:to] + "\n(exit " + fmt.Sprint(rc) + ")\ncleanup\n"
+	cmd := exec.Command("/bin/bash", "-c", script)
+	cmd.Env = []string{"PATH=" + stubs + ":/usr/bin:/bin", "STUB_KUBECTL_OUT=" + kubectlOut}
+	b, err := cmd.CombinedOutput()
+	code = 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return diag, code, string(b)
+}
+
+func TestDiagnosticsDropFixturePodLogsKeepInfra(t *testing.T) {
+	diag, _, out := runCleanup(t, 1, "pod/a Running")
+	pods := filepath.Join(diag, "kind", "node", "pods")
+	for _, keep := range []string{"kube-system_etcd_u1", "flux-system_source_u2", "local-path-storage_prov_u5"} {
+		if !exists(filepath.Join(pods, keep)) {
+			t.Errorf("infrastructure pod log %s was deleted\n%s", keep, out)
+		}
+	}
+	for _, gone := range []string{"broken_log-injection_u3", "broken_other_u4"} {
+		if exists(filepath.Join(pods, gone)) {
+			t.Errorf("fixture pod log %s survived in the uploaded directory\n%s", gone, out)
+		}
+	}
+	if !exists(filepath.Join(diag, "kind", "node", "kubelet.log")) || !exists(filepath.Join(diag, "pods-events.txt")) {
+		t.Error("kubelet journal or get/describe output lost")
+	}
+	// the fake canary token is deliberately not a scrub pattern: a failed run must not be re-flagged
+	if strings.Contains(out, "contains a secret value") || strings.Contains(out, "contains a JWT") {
+		t.Errorf("unexpected scrub error:\n%s", out)
+	}
+}
+
+func TestCleanupPreservesOriginalExitCode(t *testing.T) {
+	for _, rc := range []int{130, 7, 1} {
+		if _, code, out := runCleanup(t, rc, "pod/a Running"); code != rc {
+			t.Errorf("exit code %d became %d\n%s", rc, code, out)
+		}
+	}
+	// a real-secret leak is reported and the file deleted, still without changing the exit code
+	diag, code, out := runCleanup(t, 130, "password k8smcp-canary-secret-value-7f3a9c2e51d4")
+	if code != 130 || !strings.Contains(out, "contains a secret value") || exists(filepath.Join(diag, "pods-events.txt")) {
+		t.Errorf("leak handling: code=%d\n%s", code, out)
 	}
 }
