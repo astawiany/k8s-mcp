@@ -1,0 +1,6 @@
+bin/
+dist/
+*.kubeconfig
+kubeconfig*
+.DS_Store
+.superpowers/
