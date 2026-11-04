@@ -10,23 +10,26 @@
 //
 // The wrapper, in order, for a successful call:
 //
-//  1. encode the handler's Go value to JSON and decode it to a generic tree
-//     (then the first backstop pass of step 3);
+//  1. encode the handler's Go value to JSON and decode it to a generic tree;
 //  2. for every string, map keys included: replace it with redact.Redacted
-//     if it holds a token shape (redact.EnvValue), cut a string larger than
-//     MaxBytes before sanitising (to bound the cost), untrusted.Sanitize it,
-//     cap it with limits.TruncateText(Default), and check the token shapes
-//     again on the sanitised text;
-//  3. backstop: redact.Object over the whole tree, which reduces any map
-//     with kind Secret (any case, at any depth) to its metadata and masks
-//     embedded Secrets in annotations. It runs twice: on the raw tree
-//     before step 2 (an embedded Secret in an annotation is only found
-//     while its JSON parses, so before any cut) and again after step 2
-//     (kinds and keys hidden by invisible characters only match after
-//     Sanitize);
-//  4. encode the tree as compact JSON and cut the document so that the
+//     if it holds a token shape (redact.EnvValue), cut it only if it is
+//     larger than 4 MiB (a guard; Sanitize is linear), untrusted.Sanitize
+//     it, and check the token shapes again on the sanitised, uncut text;
+//  3. backstop, first pass: redact.Object over the whole tree, which reduces
+//     any map with kind Secret (any case, at any depth) to its metadata and
+//     masks embedded Secrets in annotations. It runs after Sanitize (so
+//     invisible characters cannot hide a kind, a key or break an
+//     annotation's JSON) and before any per-string cut (an embedded Secret
+//     is only found while its JSON parses);
+//  4. cap every string and key with limits.TruncateText(Default) and check
+//     the token shapes again;
+//  5. backstop, second pass, on the final strings;
+//  6. encode the tree as compact JSON and cut the document so that the
 //     escaped body plus the envelope fits MaxBytes, with a limits.Note;
-//  5. untrusted.Wrap with a fresh untrusted.NewBoundary, as one TextContent.
+//  7. untrusted.Wrap with a fresh untrusted.NewBoundary, as one TextContent.
+//
+// Keys that become equal after step 2 or 4 get a " (n)" suffix, assigned
+// in sorted key order.
 //
 // A handler error, or a panic, becomes an IsError result whose text comes
 // from errorText: only fixed server-authored sentences (error class, hint)

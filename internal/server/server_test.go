@@ -578,3 +578,41 @@ func TestBackstopSeesKindHiddenByInvisibles(t *testing.T) {
 		t.Errorf("Secret with an invisible character in its kind leaked: %s", body)
 	}
 }
+
+func TestBackstopSeesLongEmbeddedSecretsHiddenByInvisibles(t *testing.T) {
+	// Each annotation embeds a Secret in JSON longer than the per-string
+	// line cut, with an invisible character in front of it (or in the
+	// annotations key). Only sanitising before the cut and before the first
+	// backstop pass keeps the JSON parseable for redact.Object.
+	const leak = "TEAKEDVALUE123"
+	js := `{"apiVersion":"v1","kind":"Secret","data":{"password":"` + leak + `"},"pad":"` + strings.Repeat("x", 2500) + `"}`
+	cm := func(annKey, name, value string) map[string]any {
+		return map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": "cm", annKey: map[string]any{name: value}}}
+	}
+	cases := map[string]map[string]any{
+		"zero-width before value":  cm("annotations", "example.com/cfg", "\u200b"+js),
+		"ANSI before value":        cm("annotations", "example.com/cfg", "\x1b[0m"+js),
+		"zero-width in key":        cm("anno\u200btations", "example.com/cfg", js),
+		"last-applied, zero-width": cm("annotations", "kubectl.kubernetes.io/last-applied-configuration", "\u200b"+js),
+	}
+	for name, obj := range cases {
+		t.Run(name, func(t *testing.T) {
+			if body := payload(t, obj); strings.Contains(body, leak) {
+				t.Errorf("embedded Secret value leaked")
+			}
+		})
+	}
+}
+
+func TestHiddenTokenSplitByCutIsStillRedacted(t *testing.T) {
+	// The raw check misses the token (a zero-width space hides it) and the
+	// line cut lands inside it: only a token check on the sanitised, uncut
+	// string catches it.
+	rest := "p_" + strings.Repeat("k4T9", 9)
+	keep := 12
+	body := payload(t, map[string]any{"log": strings.Repeat("x", limits.Default().MaxLineLen-keep) + "gh\u200b" + rest})
+	if prefix := ("gh" + rest)[:keep]; strings.Contains(body, prefix) {
+		t.Errorf("token prefix %q leaked", prefix)
+	}
+}

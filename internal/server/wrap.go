@@ -59,12 +59,15 @@ func wrapResult(v any) *mcp.CallToolResult {
 		return errorResult(fmt.Errorf("internal error: the tool result cannot be decoded: %w", err))
 	}
 
-	// Backstop, first pass on the raw tree: embedded Secrets in annotations
-	// are only found while their JSON still parses, i.e. before any cut.
+	// Sanitize every string and key first, without the size cut, so that
+	// invisible characters cannot hide a Secret kind or an annotations key,
+	// nor break the JSON of an annotation, from the first backstop pass.
+	tree = mapTree(tree, sanitizeString)
+	// Backstop, first pass: embedded Secrets in annotations are only found
+	// while their JSON still parses, i.e. before any cut.
 	tree = backstop(tree)
-	tree = cleanTree(tree)
-	// Second pass: kinds and keys hidden by invisible characters only match
-	// after Sanitize.
+	tree = mapTree(tree, capString)
+	// Second pass, on the final strings.
 	tree = backstop(tree)
 
 	var buf bytes.Buffer
@@ -85,17 +88,22 @@ func backstop(tree any) any {
 	return redact.Object(map[string]any{"v": tree})["v"]
 }
 
-// cleanTree returns v with every string and map key cleaned (cleanString).
-// Keys that become equal after cleaning get a " (n)" suffix so no value is
-// lost or overwritten; keys are visited in sorted order so the suffixes are
-// the same on every call.
-func cleanTree(v any) any {
+// preCut bounds the text Sanitize sees per string. Sanitize is linear, so
+// this is only a guard against absurd inputs; it is far above the per-string
+// cap applied later, and equals the default log read limit.
+const preCut = 4 << 20
+
+// mapTree returns v with f applied to every string and map key. Keys that
+// become equal after f get a " (n)" suffix so no value is lost or
+// overwritten; keys are visited in sorted order so the suffixes are the same
+// on every call.
+func mapTree(v any, f func(string) string) any {
 	switch t := v.(type) {
 	case string:
-		return cleanString(t)
+		return f(t)
 	case []any:
 		for i, e := range t {
-			t[i] = cleanTree(e)
+			t[i] = mapTree(e, f)
 		}
 		return t
 	case map[string]any:
@@ -107,36 +115,42 @@ func cleanTree(v any) any {
 		sort.Strings(keys)
 		for _, k := range keys {
 			e := t[k]
-			ck := cleanString(k)
+			base := f(k)
+			ck := base
 			for n := 2; ; n++ {
 				if _, taken := out[ck]; !taken {
 					break
 				}
-				ck = fmt.Sprintf("%s (%d)", cleanString(k), n)
+				ck = fmt.Sprintf("%s (%d)", base, n)
 			}
-			out[ck] = cleanTree(e)
+			out[ck] = mapTree(e, f)
 		}
 		return out
 	}
 	return v // json.Number, bool, nil
 }
 
-// cleanString applies, in order: token-shape redaction of the raw string (so
-// a credential beyond a later cut still hides the value), a cut of strings
-// larger than MaxBytes (bounding Sanitize's cost), Sanitize, the per-string
-// limits, and token-shape redaction again (tokens hidden by invisible
-// characters only match after Sanitize).
-func cleanString(str string) string {
+// sanitizeString is the first string pass: token-shape redaction of the raw
+// string, a guard cut at preCut, untrusted.Sanitize, and token-shape
+// redaction again (tokens hidden by invisible characters only match after
+// Sanitize). Both token checks see the whole string, before the per-string
+// cap, so a token split by a later cut still hides the value.
+func sanitizeString(str string) string {
 	if str == "" {
 		return str
 	}
 	if redact.EnvValue("", str) == redact.Redacted {
 		return redact.Redacted
 	}
-	if len(str) > lim.MaxBytes {
-		str, _ = limits.TruncateText(str, limits.Limits{MaxBytes: lim.MaxBytes})
+	if len(str) > preCut {
+		str, _ = limits.TruncateText(str, limits.Limits{MaxBytes: preCut})
 	}
-	str = untrusted.Sanitize(str)
+	return redact.EnvValue("", untrusted.Sanitize(str))
+}
+
+// capString is the second string pass: the per-string limits
+// (limits.Default: line length, lines, bytes) and a final token check.
+func capString(str string) string {
 	str, _ = limits.TruncateText(str, lim)
 	return redact.EnvValue("", str)
 }
