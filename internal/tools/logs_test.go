@@ -284,3 +284,82 @@ func TestPodLogsPodNotFound(t *testing.T) {
 		t.Errorf("want a not-found error: %s", text)
 	}
 }
+
+func TestPodLogsMasksPrivateKeyBlocks(t *testing.T) {
+	const body1, body2 = "MIIEowIBAAKCAQEAu1SUfakefakefakefakefakefakefake0123456789", "VTLw7onLRnrq0abcdefghijklmnopqrstuvwxyzABCDEFG+/=="
+	const mark = "[redacted: private key block]"
+	for _, tc := range []struct {
+		name, log, want string
+		redacted        int
+	}{
+		{"rsa", "starting\n-----BEGIN RSA PRIVATE KEY-----\n" + body1 + "\n" + body2 + "\n-----END RSA PRIVATE KEY-----\ndone\n",
+			"starting\n" + mark + "\ndone", 1},
+		{"pkcs8", "a\n-----BEGIN PRIVATE KEY-----\n" + body1 + "\n-----END PRIVATE KEY-----\nb\n", "a\n" + mark + "\nb", 1},
+		{"openssh", "a\n-----BEGIN OPENSSH PRIVATE KEY-----\n" + body1 + "\n" + body2 + "\n-----END OPENSSH PRIVATE KEY-----\nb\n", "a\n" + mark + "\nb", 1},
+		{"encrypted", "a\n-----BEGIN ENCRYPTED PRIVATE KEY-----\n" + body1 + "\n-----END ENCRYPTED PRIVATE KEY-----\nb\n", "a\n" + mark + "\nb", 1},
+		{"pgp", "a\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\n" + body1 + "\n=abcd\n-----END PGP PRIVATE KEY BLOCK-----\nb\n", "a\n" + mark + "\nb", 1},
+		{"no END in the window", "a\n-----BEGIN RSA PRIVATE KEY-----\n" + body1 + "\n" + body2 + "\n", "a\n" + mark, 1},
+		{"window starts mid-body", body1 + "\n" + body2 + "\n-----END RSA PRIVATE KEY-----\nafter\n", mark + "\nafter", 1},
+		{"two blocks", "-----BEGIN EC PRIVATE KEY-----\n" + body1 + "\n-----END EC PRIVATE KEY-----\nmid\n-----BEGIN PRIVATE KEY-----\n" + body2 + "\n-----END PRIVATE KEY-----\n",
+			mark + "\nmid\n" + mark, 2},
+		{"certificate is kept", "a\n-----BEGIN CERTIFICATE-----\n" + body1 + "\n-----END CERTIFICATE-----\nb\n",
+			"a\n-----BEGIN CERTIFICATE-----\n" + body1 + "\n-----END CERTIFICATE-----\nb", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := callTool(t, kube.SingleFakeFactory(logsClient(tc.log)), "pod_logs", map[string]any{"namespace": "a", "pod": "web"})
+			body := servertest.Payload(t, res)
+			var out logsOut
+			decode(t, res, &out)
+			if out.Log != tc.want || out.RedactedLines != tc.redacted || out.Hidden {
+				t.Errorf("log %q (redacted %d, hidden %v), want %q (redacted %d)", out.Log, out.RedactedLines, out.Hidden, tc.want, tc.redacted)
+			}
+			if tc.redacted > 0 && (strings.Contains(body, body1[:20]) || strings.Contains(body, body2[:20])) {
+				t.Errorf("key material leaked: %s", body)
+			}
+		})
+	}
+}
+
+func TestPodLogsCRLFKeepsNewestLines(t *testing.T) {
+	var b strings.Builder
+	for i := range 600 {
+		fmt.Fprintf(&b, "C%d\r\n", i)
+	}
+	out := podLogs(t, kube.SingleFakeFactory(logsClient(b.String())), map[string]any{"namespace": "a", "pod": "web", "tailLines": 500})
+	lines := strings.Split(out.Log, "\n")
+	if out.LineCount != 500 || len(lines) != 500 || lines[0] != "C100" || lines[499] != "C599" || strings.Contains(out.Log, "[truncated") {
+		t.Errorf("CRLF: lineCount %d, %d lines, first %q, last %q", out.LineCount, len(lines), lines[0], lines[len(lines)-1])
+	}
+}
+
+func TestPodLogsProgressLinesShowLastSegment(t *testing.T) {
+	var b strings.Builder
+	for i := range 300 {
+		fmt.Fprintf(&b, "P%d 10%%\rP%d 50%%\rP%d done\r\n", i, i, i)
+	}
+	out := podLogs(t, kube.SingleFakeFactory(logsClient(b.String())), map[string]any{"namespace": "a", "pod": "web", "tailLines": 300})
+	lines := strings.Split(out.Log, "\n")
+	if out.LineCount != 300 || len(lines) != 300 || lines[0] != "P0 done" || lines[299] != "P299 done" || strings.Contains(out.Log, "50%") {
+		t.Errorf("progress: lineCount %d, %d lines, first %q, last %q", out.LineCount, len(lines), lines[0], lines[len(lines)-1])
+	}
+	out = podLogs(t, kube.SingleFakeFactory(logsClient("a x\rx\rx\r\nb\n")), map[string]any{"namespace": "a", "pod": "web"})
+	if out.Log != "x\nb" || out.LineCount != 2 {
+		t.Errorf("bare-CR line: %q (%d lines)", out.Log, out.LineCount)
+	}
+}
+
+func TestPodLogsPreviousWithoutTerminatedInstance(t *testing.T) {
+	res := callTool(t, kube.SingleFakeFactory(logsClient("current\n")), "pod_logs", map[string]any{"namespace": "a", "pod": "web", "previous": true})
+	if text := servertest.Text(t, res); !res.IsError || !strings.Contains(text, "retry without previous") {
+		t.Errorf("want an error hinting to drop previous: %s", text)
+	}
+}
+
+func TestPodLogsOnlyNewlines(t *testing.T) {
+	for _, log := range []string{"\n", "\n\n", "\r\n"} {
+		out := podLogs(t, kube.SingleFakeFactory(logsClient(log)), map[string]any{"namespace": "a", "pod": "web"})
+		if out.LineCount != 0 || out.Log != "" {
+			t.Errorf("%q: lineCount %d, log %q", log, out.LineCount, out.Log)
+		}
+	}
+}

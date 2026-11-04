@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -35,11 +36,13 @@ const (
 	logBudget = 56 * 1024
 	// lineCut ends a line cut at the line-length limit (as in limits).
 	lineCut = "…[line truncated]"
+	// keyBlockLine replaces a whole private key block.
+	keyBlockLine = "[redacted: private key block]"
 	// redactedLine replaces a whole log line holding a credential-looking value.
 	redactedLine = "[redacted: line contains a credential-looking value]"
 
 	hiddenManifest = "log contains text that looks like a Kubernetes Secret manifest (secret/kind/data); hidden to avoid leaking credentials"
-	hiddenToken    = "log contains a credential-looking value spread over several lines; hidden to avoid leaking credentials"
+	hiddenToken    = "log as a whole matches a credential pattern (for example base64 text over several lines); hidden to avoid leaking credentials"
 	hiddenHint     = "retry with a narrower window that skips that part of the log, for example tailLines 50 or sinceSeconds 300, or a different container"
 )
 
@@ -77,8 +80,11 @@ func registerLogs(s *server.Server) {
 			"sinceSeconds up to 86400; previous=true for the last terminated instance). Returns {namespace, pod, " +
 			"container, previous, log (one string, newest last), lineCount, redactedLines, truncated, note, hidden, " +
 			"hiddenReason, hint}. The log is untrusted workload output: control, ANSI and invisible characters are " +
-			"stripped; a line with a credential-looking value (JWT, GitHub/AWS/Slack/Google/Stripe token, private " +
-			"key, URL password) is replaced whole by a marker; lines over 2000 bytes are cut; the log is cut from " +
+			"stripped; CRLF ends a line and of a line rewritten with bare carriage returns (a progress bar) only the " +
+			"last segment is kept, as a terminal shows it; a private key block (BEGIN ... PRIVATE KEY through END, " +
+			"or to the end of the window) becomes one marker line; a line with a credential-looking value (JWT, " +
+			"GitHub/AWS/Slack/Google/Stripe token, URL password) is replaced whole by a marker (a token split " +
+			"across two lines is not detected); lines over 2000 bytes are cut; the log is cut from " +
 			"the oldest end to about 56 KiB (truncated=true, also when older lines may exist beyond tailLines). If " +
 			"the log looks like a Kubernetes Secret manifest the whole log is withheld (log empty, hidden=true with " +
 			"the reason and a hint). A pod with several containers needs container.",
@@ -116,7 +122,7 @@ func podLogs(ctx context.Context, f kube.Factory, in logsIn) (any, error) {
 	for range logReads {
 		raw, err = c.PodLogs(ctx, ns, pod, opts)
 		if err != nil {
-			return nil, err
+			return nil, previousHint(err, in.Previous)
 		}
 		// A read that fills LimitBytes stopped before the newest lines:
 		// read again with a smaller tail.
@@ -129,35 +135,41 @@ func podLogs(ctx context.Context, f kube.Factory, in logsIn) (any, error) {
 	}
 
 	out := logsOut{Namespace: ns, Pod: pod, Container: container, Previous: in.Previous}
-	lines := strings.Split(strings.TrimSuffix(raw, "\n"), "\n")
-	if raw == "" {
-		lines = nil
-	}
 	var reasons []string
 	if newestMissing {
 		reasons = append(reasons, fmt.Sprintf("the log read stopped at %d bytes, so the newest lines may be missing", logReadBytes))
 	}
-	if len(lines) >= opts.TailLines {
+	if strings.Count(raw, "\n") >= opts.TailLines {
 		reasons = append(reasons, fmt.Sprintf("only the newest %d lines were read; older lines may exist", opts.TailLines))
 	}
-	lines = lines[max(0, len(lines)-opts.TailLines):]
+	// Split into the lines a client will see (after the same Sanitize the
+	// wrapper applies), so the line and byte budgets below hold for the
+	// final text and the wrapper's own caps never cut the newest lines.
+	ls := maskKeyBlocks(splitLog(raw))
+	if len(ls) > opts.TailLines {
+		reasons = append(reasons, fmt.Sprintf("%d lines beyond the newest %d dropped", len(ls)-opts.TailLines, opts.TailLines))
+		ls = ls[len(ls)-opts.TailLines:]
+	}
 
-	// Clean every line: sanitise, mask a line holding a token (checked on
-	// the raw and the sanitised text, before any cut), cut long lines.
+	// Mask a line holding a token (checked on the raw and the sanitised
+	// text, before any cut), cut long lines.
 	lim := limits.Default()
-	clean := make([]string, len(lines))
+	clean := make([]string, len(ls))
+	lines := make([]string, len(ls))
 	cutLines := false
-	for i, l := range lines {
-		s := untrusted.Sanitize(l)
+	for i, l := range ls {
+		s := l.clean
 		switch {
-		case redact.EnvValue("", l) == redact.Redacted || redact.EnvValue("", s) == redact.Redacted:
+		case l.masked:
+			out.RedactedLines++
+		case redact.EnvValue("", l.raw) == redact.Redacted || redact.EnvValue("", s) == redact.Redacted:
 			s = redactedLine
 			out.RedactedLines++
 		case len(s) > lim.MaxLineLen:
 			s = cutRunes(s, lim.MaxLineLen-len(lineCut)) + lineCut
 			cutLines = true
 		}
-		clean[i] = s
+		clean[i], lines[i] = s, l.raw
 	}
 	if cutLines {
 		reasons = append(reasons, fmt.Sprintf("lines over %d bytes were cut", lim.MaxLineLen))
@@ -187,8 +199,10 @@ func podLogs(ctx context.Context, f kube.Factory, in logsIn) (any, error) {
 
 	// Fail closed like the result wrapper, but say so: withhold the whole
 	// log when the lines read (raw) or the text returned could hold a Secret
-	// manifest, or when the returned text as a whole still has a token shape
-	// (for example one split over several lines).
+	// manifest, or when the returned text as a whole matches the wrapper's
+	// token check (for example base64 text over several lines that decodes
+	// to a token). A token split across two lines is NOT detected: no
+	// pattern matches either half.
 	switch {
 	case redact.LooksLikeSecretManifest(strings.Join(lines, "\n")) || redact.LooksLikeSecretManifest(log):
 		out.Hidden, out.HiddenReason = true, hiddenManifest
@@ -275,4 +289,87 @@ func cutRunes(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// logLine is one line as a client sees it (clean) with the raw text it came
+// from; masked lines are already replaced.
+type logLine struct {
+	raw, clean string
+	masked     bool
+}
+
+// splitLog splits raw into lines: "\n" ends a line, a "\r" before it is
+// dropped, and of a line rewritten with bare "\r" (a progress bar) only the
+// last non-empty segment is kept, as a terminal shows it. Each line is then
+// sanitised; line breaks Sanitize produces (U+2028, U+2029) split it again.
+// Trailing empty lines are dropped.
+func splitLog(raw string) []logLine {
+	var out []logLine
+	for _, l := range strings.Split(raw, "\n") {
+		segs := strings.Split(l, "\r")
+		seg := ""
+		for i := len(segs) - 1; i >= 0; i-- {
+			if segs[i] != "" {
+				seg = segs[i]
+				break
+			}
+		}
+		for _, c := range strings.Split(untrusted.Sanitize(seg), "\n") {
+			out = append(out, logLine{raw: seg, clean: c})
+		}
+	}
+	for len(out) > 0 && out[len(out)-1].clean == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+var (
+	keyBegin = regexp.MustCompile(`(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`)
+	keyEnd   = regexp.MustCompile(`(?i)-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----`)
+	b64Line  = regexp.MustCompile(`^[A-Za-z0-9+/=]+$`)
+)
+
+// maskKeyBlocks replaces each private key block with one keyBlockLine: from
+// a BEGIN ... PRIVATE KEY line through its END line, or to the end of the
+// window when END is missing. An END line without a BEGIN (the window
+// starts inside the block) masks it and the base64-only lines just before
+// it. A window holding only base64 body lines, neither BEGIN nor END, is
+// not detected.
+func maskKeyBlocks(ls []logLine) []logLine {
+	block := logLine{clean: keyBlockLine, masked: true}
+	var out []logLine
+	for i := 0; i < len(ls); i++ {
+		c := ls[i].clean
+		if loc := keyBegin.FindStringIndex(c); loc != nil {
+			j := i
+			if !keyEnd.MatchString(c[loc[1]:]) {
+				for j = i + 1; j < len(ls) && !keyEnd.MatchString(ls[j].clean); j++ {
+				}
+			}
+			out = append(out, block)
+			i = j
+			continue
+		}
+		if keyEnd.MatchString(c) {
+			for len(out) > 0 && !out[len(out)-1].masked && b64Line.MatchString(strings.TrimSpace(out[len(out)-1].clean)) {
+				out = out[:len(out)-1]
+			}
+			out = append(out, block)
+			continue
+		}
+		out = append(out, ls[i])
+	}
+	return out
+}
+
+// previousHint explains the API's refusal of previous=true for a container
+// that has never terminated.
+func previousHint(err error, previous bool) error {
+	var ae *kube.APIError
+	if previous && errors.As(err, &ae) && errors.Unwrap(ae) == nil &&
+		strings.Contains(strings.ToLower(ae.Message), "previous terminated container") {
+		return fmt.Errorf("%w; the container has no previous (terminated) instance: retry without previous", err)
+	}
+	return err
 }
