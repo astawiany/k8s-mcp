@@ -472,3 +472,18 @@ func TestWorkloadHealthRestartingRepeatedly(t *testing.T) {
 		}
 	})
 }
+
+// A healthy deployment whose pod crashed long ago still has no warning or
+// critical finding.
+func TestWorkloadHealthHealthyWithOldRestartHasNoWarnings(t *testing.T) {
+	d := hDeploy(1, 1, map[string]any{"type": "Progressing", "status": "True", "reason": "NewReplicaSetAvailable", "message": "ok"})
+	old := map[string]any{"restartCount": 4, "ready": true, "state": map[string]any{"running": map[string]any{}},
+		"lastState": terminated("Error", 1, "2020-01-01T00:00:00Z")}
+	out := health(t, d, hRS("web-1", 1), hPod("a", "web-1", "Running", true, old, nil))
+	for _, f := range out.Findings {
+		if f.Severity != "info" {
+			t.Errorf("unexpected finding %+v", f)
+		}
+	}
+	wantFinding(t, out, "info", "pod/a/lastState", "restarted 4 times in the past", "currently ready")
+}

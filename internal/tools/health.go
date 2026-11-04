@@ -21,6 +21,10 @@ const maxHealthPods = 50
 
 var healthKinds = []string{"Deployment", "StatefulSet", "DaemonSet"}
 
+// recentCrash is how long after a crash a ready container that restarted
+// more than once is still reported as restarting repeatedly (critical).
+const recentCrash = 15 * time.Minute
+
 type healthIn struct {
 	Context   string `json:"context,omitempty" jsonschema:"kubeconfig context name; defaults to the current context"`
 	Namespace string `json:"namespace" jsonschema:"namespace of the workload"`
@@ -397,7 +401,12 @@ func tsAge(ts string, now time.Time) (time.Duration, bool) {
 }
 
 func analyzePod(p map[string]any) podInfo {
-	now := time.Now()
+	return analyzePodAt(p, time.Now())
+}
+
+// analyzePodAt is analyzePod with the current time passed in (tests use a
+// fixed clock).
+func analyzePodAt(p map[string]any, now time.Time) podInfo {
 	name := str(p, "metadata", "name")
 	hp := healthPod{Name: name, Phase: str(p, "status", "phase")}
 	ref := func(s string) string { return "pod/" + name + "/" + s }
@@ -482,8 +491,20 @@ func analyzePod(p map[string]any) podInfo {
 		case term != nil && term.ExitCode != 0 && restarts > 0 && reason != "CrashLoopBackOff":
 			// A crash loop seen between back-offs: running again, terminated
 			// again, or being recreated. CrashLoopBackOff already has its
-			// own finding with the same facts.
-			add("critical", fmt.Sprintf("pod %s container %s is restarting repeatedly: %d restarts, last exit code %d (%s)", name, label, restarts, term.ExitCode, term.Reason), evid)
+			// own finding with the same facts. A container that is ready
+			// again is critical only if it crashed recently and more than
+			// once; an old crash is reported as info.
+			age, known := tsAge(term.FinishedAt, now)
+			recent := known && age < recentCrash
+			if cs["ready"] != true || (recent && restarts >= 2) {
+				add("critical", fmt.Sprintf("pod %s container %s is restarting repeatedly: %d restarts, last exit code %d (%s)", name, label, restarts, term.ExitCode, term.Reason), evid)
+			} else {
+				at := term.FinishedAt
+				if at == "" {
+					at = "an unknown time"
+				}
+				add("info", fmt.Sprintf("pod %s container %s restarted %d times in the past, last exit code %d (%s) at %s, currently ready", name, label, restarts, term.ExitCode, term.Reason, at), evid)
+			}
 		case curTerm != nil && term.ExitCode != 0:
 			add("critical", fmt.Sprintf("pod %s container %s terminated with exit code %d (%s)", name, label, term.ExitCode, term.Reason), evid)
 		}
