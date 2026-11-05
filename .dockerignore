@@ -1,0 +1,15 @@
+# Allowlist: the build context is only the Go module and its non-test sources. Everything else
+# (.git, test/, docs/, deploy/, scripts/, .superpowers/, .env files, kubeconfigs, keys, bin/, dist/,
+# editor and OS files) never reaches the builder.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+# and inside the allowed directories: no tests, fixtures or anything secret-like
+**/*_test.go
+**/testdata/
+**/.env*
+**/*kubeconfig*
+**/*.pem
+**/*.key

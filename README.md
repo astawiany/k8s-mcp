@@ -16,10 +16,12 @@ License: MIT, see [LICENSE](LICENSE).
 
 ## Install
 
-**From a release.** Signed static binaries for linux and darwin (amd64,
-arm64) and a container image are planned with the release pipeline; how to
-verify them will be in [docs/security.md](docs/security.md). No release has
-been published yet.
+**From a release.** No release has been published yet. Each release
+`vX.Y.Z` will carry static binaries `k8s-mcp_<version>_<os>_<arch>.tar.gz`
+(linux and darwin, amd64 and arm64), `SHA256SUMS` and a `.sigstore.json`
+cosign bundle for each of them, plus the image
+`ghcr.io/astawiany/k8s-mcp:vX.Y.Z` (linux/amd64, distroless, signed). Verify
+before use: [docs/security.md](docs/security.md#verifying-releases).
 
 **From source** (Go 1.26 or newer):
 

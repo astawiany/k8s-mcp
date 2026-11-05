@@ -1,0 +1,255 @@
+# Release: on a vX.Y.Z tag cut from main, publish signed static binaries (GitHub Release) and a signed
+# container image (ghcr.io). Adapted from the sibling project fleet-in-a-repo, whose release.yml ran on
+# GitHub; its fixes are kept (pinned BuildKit and SBOM scanner, scan-before-push, scanned == pushed
+# check, absence re-checks right before every write, per-tag concurrency).
+#   verify:  tag format, tagged commit is on main, version not yet in the registry nor a Release
+#   build:   linux/darwin x amd64/arm64 static binaries (govulncheck per target first), as artifacts
+#   image:   build, scan (trivy, govulncheck) BEFORE pushing, push BY DIGEST ONLY with SBOM + provenance,
+#            check the pushed image is the scanned one, sign the digest with cosign (keyless), verify
+#            with the exact identity, and only then create the version tag pointing to that digest
+#   release: SHA256SUMS over the archives, cosign sign-blob (bundles) of each archive and SHA256SUMS,
+#            verify-blob with the exact identity, then create the GitHub Release with all of them
+# image and release run in the `release` Environment: a reviewer approves each before it starts.
+# Auth is GITHUB_TOKEN only; permissions are granted per job. Expressions never appear inside run:
+# blocks (values go through env). Consumers: docs/security.md.
+---
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+# Runs for the same tag are serialized and never cancelled. Per tag: with one shared group a third tag
+# would replace a second one that is still waiting (GitHub keeps one pending run per group).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Never let the go command download a different toolchain behind the pinned one.
+  GOTOOLCHAIN: local
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # read-only registry access: GHCR packages are private until made public, so an anonymous
+      # lookup cannot tell "not published" from "not allowed"
+      packages: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      owner: ${{ steps.check.outputs.owner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # full history and all branches: the tagged commit must be an ancestor of origin/main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tag format, released from main, version not yet published
+        id: check
+        env:
+          GH_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          tag="$(scripts/release.sh validate-tag "$TAG")"
+          # GITHUB_SHA is the commit every later job checks out and builds
+          scripts/release.sh check-ancestor "$GITHUB_SHA" origin/main
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          scripts/release.sh check-absent image "ghcr.io/${owner}/k8s-mcp:${tag}"
+          docker logout ghcr.io
+          scripts/release.sh check-absent release "$GITHUB_REPOSITORY" "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "owner=$owner" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      # not GOOS/GOARCH: those would also cross-compile the tools installed below
+      TARGET_OS: ${{ matrix.goos }}
+      TARGET_ARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Go and govulncheck (pinned)
+        run: |
+          export GO_ROOT_DIR="$HOME/.local/goroot"
+          scripts/ci-install-tools.sh go
+          export PATH="$GO_ROOT_DIR/go/bin:$PATH"
+          scripts/ci-install-tools.sh govulncheck
+          echo "$GO_ROOT_DIR/go/bin" >> "$GITHUB_PATH"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: govulncheck for the target platform (fails on a called vulnerable symbol)
+        run: GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" govulncheck ./...
+      - name: Build static binary and archive
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          scripts/release.sh build-binary "$TARGET_OS" "$TARGET_ARCH" "$TAG" dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/k8s-mcp_*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # keyless cosign signing (Sigstore Fulcio certificate from the GitHub OIDC token)
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      ref: ${{ steps.push.outputs.ref }}
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      IMAGE: ghcr.io/${{ needs.verify.outputs.owner }}/k8s-mcp
+      SOURCE: https://github.com/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install tools (pinned, sha256-verified)
+        run: |
+          scripts/ci-install-tools.sh cosign trivy
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build settings and buildx builder (pinned BuildKit)
+        run: |
+          # shellcheck disable=SC1091
+          source versions.env
+          {
+            echo "REVISION=$(git rev-parse HEAD)"
+            # fixed timestamps: the scan build and the push build produce the same image config
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct HEAD)"
+            echo "BUILDER=release"
+            echo "SBOM_GENERATOR_IMAGE=$SBOM_GENERATOR_IMAGE"
+          } >> "$GITHUB_ENV"
+          # attestations (SBOM, provenance) need the docker-container driver
+          docker buildx create --name release --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE"
+          docker buildx inspect --bootstrap release
+      - name: Build for scanning (same Dockerfile, context and build args as the push)
+        run: scripts/release.sh build --load -t k8s-mcp:scan
+      - name: Security gate (Trivy and govulncheck; fails before anything is pushed)
+        run: scripts/security-scan.sh k8s-mcp:scan
+      - name: Push by digest (no tag yet) with SBOM and provenance, record digest
+        id: push
+        env:
+          GH_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          # again here: approval may have taken hours, or this is a re-run
+          scripts/release.sh check-absent image "$IMAGE:$TAG"
+          # --sbom with a pinned generator (implies --sbom=true; the default generator is a floating tag)
+          scripts/release.sh build --provenance=mode=max --sbom="generator=$SBOM_GENERATOR_IMAGE" \
+            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file "$RUNNER_TEMP/image-metadata.json"
+          digest="$(scripts/release.sh image-digest "$RUNNER_TEMP/image-metadata.json")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+      - name: The pushed image is the scanned image
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+        run: scripts/release.sh assert-scanned k8s-mcp:scan "$REF"
+      - name: Sign by digest and verify
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+        run: |
+          identity="$(scripts/release.sh identity "$GITHUB_REPOSITORY" "$TAG")"
+          cosign sign --yes "$REF"
+          cosign verify "$REF" \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "verified signature of $REF ($identity)"
+      - name: Tag the signed digest with the version
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          scripts/release.sh check-absent image "$IMAGE:$TAG"
+          docker buildx imagetools create -t "$IMAGE:$TAG" "$REF"
+          scripts/release.sh assert-tag "$IMAGE:$TAG" "$DIGEST"
+      - name: Summary
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+        run: |
+          {
+            echo "### Image"
+            echo "\`$REF\` (tag \`$TAG\`): scanned, SBOM + provenance attached, signed and verified"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    needs: [verify, build, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write  # create the GitHub Release
+      id-token: write  # keyless cosign sign-blob
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
+      IMAGE_REF: ${{ needs.image.outputs.ref }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install cosign (pinned, sha256-verified)
+        run: |
+          scripts/ci-install-tools.sh cosign
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # download-artifact v8 fails on a digest mismatch by default
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS over exactly the four archives
+        run: scripts/release.sh checksums dist "$TAG"
+      - name: Sign archives and SHA256SUMS (sign-blob, bundles), verify with the exact identity
+        run: |
+          identity="$(scripts/release.sh identity "$GITHUB_REPOSITORY" "$TAG")"
+          for f in dist/k8s-mcp_*.tar.gz dist/SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f" > /dev/null
+          done
+          for f in dist/k8s-mcp_*.tar.gz dist/SHA256SUMS; do
+            cosign verify-blob --bundle "$f.sigstore.json" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$f"
+          done
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # again here: approval may have taken hours, or this is a re-run
+          scripts/release.sh check-absent release "$GITHUB_REPOSITORY" "$TAG"
+          scripts/release.sh notes "$TAG" "$IMAGE_REF" "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "k8s-mcp $TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            dist/k8s-mcp_*.tar.gz dist/SHA256SUMS dist/*.sigstore.json
+      - name: Summary
+        run: |
+          {
+            echo "### GitHub Release $TAG"
+            echo "4 archives, SHA256SUMS and their .sigstore.json bundles: signed and verified"
+            echo "image: \`$IMAGE_REF\`"
+          } >> "$GITHUB_STEP_SUMMARY"
