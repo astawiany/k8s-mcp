@@ -38,6 +38,35 @@ func workflowPath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), ".github", "workflows", "validate.yml")
 }
 
+// checkoutCredentials returns a violation for every actions/checkout step, in any job, that does
+// not set persist-credentials: false (the default leaves GITHUB_TOKEN in .git/config for every
+// later step).
+func checkoutCredentials(wf map[string]any) []string {
+	var bad []string
+	jobs, _ := wf["jobs"].(map[string]any)
+	names := make([]string, 0, len(jobs))
+	for n := range jobs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		job, _ := jobs[n].(map[string]any)
+		steps, _ := job["steps"].([]any)
+		for i, s := range steps {
+			step, _ := s.(map[string]any)
+			uses, _ := step["uses"].(string)
+			if !strings.HasPrefix(uses, "actions/checkout@") {
+				continue
+			}
+			w, _ := step["with"].(map[string]any)
+			if v, ok := w["persist-credentials"].(bool); !ok || v {
+				bad = append(bad, fmt.Sprintf("job %q step %d: checkout without persist-credentials: false", n, i+1))
+			}
+		}
+	}
+	return bad
+}
+
 // checkWorkflow returns every rule violation found in the workflow text.
 func checkWorkflow(text string) []string {
 	var bad []string
@@ -87,6 +116,7 @@ func checkWorkflow(text string) []string {
 		add("no concurrency group")
 	}
 
+	bad = append(bad, checkoutCredentials(wf)...)
 	jobs, _ := wf["jobs"].(map[string]any)
 	for _, name := range append(append([]string{}, requiredJobs...), "security") {
 		if _, has := jobs[name]; !has {
@@ -115,6 +145,28 @@ func checkWorkflow(text string) []string {
 			run, _ := step["run"].(string)
 			if untrustedCtx.MatchString(run) {
 				add("job %q step %d interpolates a github.event/head_ref context inside run:", n, i+1)
+			}
+		}
+	}
+	// go test -race ./... took over 5 minutes for test/injection alone on a fast machine; a
+	// GitHub runner is slower.
+	if tj, _ := jobs["test"].(map[string]any); tj != nil {
+		if tm, _ := tj["timeout-minutes"].(int); tm < 30 {
+			add("test job timeout-minutes is %v, want at least 30", tj["timeout-minutes"])
+		}
+	}
+	if lint, _ := jobs["lint"].(map[string]any); lint != nil {
+		var sc string
+		steps, _ := lint["steps"].([]any)
+		for _, st := range steps {
+			step, _ := st.(map[string]any)
+			if run, _ := step["run"].(string); strings.Contains(run, "shellcheck ") {
+				sc = run
+			}
+		}
+		for _, want := range []string{"scripts/*.sh", "test/integration/run.sh", "test/injection/eval/run.sh"} {
+			if !strings.Contains(sc, want) {
+				add("lint job does not shellcheck %s", want)
 			}
 		}
 	}
@@ -164,6 +216,10 @@ func TestValidateWorkflowRulesBite(t *testing.T) {
 		{"integration skipped on PRs", "  integration:\n", "  integration:\n    if: github.event_name != 'pull_request'\n", "must run on pull requests"},
 		{"diagnostics upload not on failure", "if: failure()\n        uses: actions/upload-artifact", "if: always()\n        uses: actions/upload-artifact", "no upload-artifact step"},
 		{"timeout removed from lint", "    timeout-minutes: 15\n", "", "no timeout-minutes"},
+		{"checkout persists credentials", "persist-credentials: false", "persist-credentials: true", "without persist-credentials: false"},
+		{"checkout persist-credentials unset", "        with:\n          persist-credentials: false\n", "", "without persist-credentials: false"},
+		{"test timeout too short", "runners are slower\n    timeout-minutes: 30\n", "runners are slower\n    timeout-minutes: 20\n", "want at least 30"},
+		{"eval script not shellchecked", " test/injection/eval/run.sh", "", "does not shellcheck test/injection/eval/run.sh"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

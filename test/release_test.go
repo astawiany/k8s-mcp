@@ -774,6 +774,7 @@ func checkReleaseWorkflow(text string) []string {
 	if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
 		return append(bad, "YAML does not parse: "+err.Error())
 	}
+	bad = append(bad, checkoutCredentials(wf)...)
 	if p, ok := wf["permissions"].(map[string]any); !ok || len(p) != 0 {
 		add("workflow-level permissions must be {} (got %v)", wf["permissions"])
 	}
@@ -1019,6 +1020,8 @@ func TestReleaseWorkflowRulesBite(t *testing.T) {
 		{"no fetch-depth", "          fetch-depth: 0\n", "", "fetch-depth: 0"},
 		{"govulncheck dropped", "govulncheck ./...", "echo skipped", "govulncheck"},
 		{"timeout removed", "    timeout-minutes: 10\n", "", "no timeout-minutes"},
+		{"checkout persists credentials", "          persist-credentials: false\n      - name: Install cosign", "          persist-credentials: true\n      - name: Install cosign", "without persist-credentials: false"},
+		{"checkout persist-credentials unset", "          fetch-depth: 0\n          persist-credentials: false\n", "          fetch-depth: 0\n", "without persist-credentials: false"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

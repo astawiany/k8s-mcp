@@ -47,13 +47,14 @@ jobs:
       # gofmt, go vet, staticcheck (pinned in versions.env) and yamllint --strict
       - run: make lint
       - name: shellcheck
-        run: shellcheck scripts/*.sh test/integration/run.sh
+        run: shellcheck scripts/*.sh test/integration/run.sh test/injection/eval/run.sh
       - name: actionlint
         run: actionlint
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # test/injection alone took 319 s under -race on a fast local machine; runners are slower
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:

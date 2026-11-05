@@ -25,8 +25,8 @@ whole workflow, every job has a timeout, and no job reads a secret.
 
 | Job | Required | What it does |
 | --- | --- | --- |
-| `lint` | yes | `make lint` (gofmt, go vet, pinned staticcheck, `yamllint --strict`), shellcheck on `scripts/*.sh` and `test/integration/run.sh`, actionlint |
-| `test` | yes | `go test -race ./...` |
+| `lint` | yes | `make lint` (gofmt, go vet, pinned staticcheck, `yamllint --strict`), shellcheck on `scripts/*.sh`, `test/integration/run.sh` and `test/injection/eval/run.sh`, actionlint |
+| `test` | yes | `go test -race ./...` (timeout 30 minutes: the injection corpus alone takes about 5 minutes under `-race` locally) |
 | `integration` | yes | `make integration`: a throwaway kind cluster (`k8s-mcp-it`) with Flux and the fixtures; Docker comes with the ubuntu runner. On failure `run.sh` writes diagnostics (pods, events, flux-system logs, `kind export logs`; never Secrets, files with a canary, token or JWT are deleted) before deleting the cluster, and the workflow uploads them with `actions/upload-artifact` as `integration-diagnostics` (7 days) |
 | `security` | no | `make vuln` (govulncheck) and `trivy fs` (fixable HIGH/CRITICAL fail, secrets fail) |
 
