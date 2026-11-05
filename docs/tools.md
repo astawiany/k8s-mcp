@@ -55,10 +55,19 @@ names or token shapes), and remove `metadata.managedFields`.
 the model can recover. The text starts with a fixed class sentence and a hint,
 then the detail in a data envelope (the detail may quote the cluster). The
 classes are: unknown kubeconfig context; context not on the allowlist (the
-message lists the allowlist); kind not found (with up to five close matches);
-not found; forbidden by RBAC (with the API server's message, which names the
-verb and resource); unauthorized; API request timed out; cannot reach the
-API server; credential plugin (exec) failed; metrics API not available.
+message lists the allowlist); kind not found (with up to five close matches;
+with none, the hint points to `list_resources kind=customresourcedefinitions`
+for custom resources); not found; forbidden by RBAC (with the API server's
+message, which names the verb and resource); unauthorized; API request timed
+out; cannot reach the API server; credential plugin (exec) failed; metrics API
+not available; refused by server policy (a Secret under any spelling; the hint
+says not to retry with another spelling). An error that fits no class reads
+"the tool failed".
+
+Argument-schema errors (a missing required field, a wrong type, an unknown
+property) come from the MCP SDK before the tool runs. They do not have this
+shape and no envelope; they quote only the call's own arguments, never
+cluster data.
 
 **Secrets.** Every tool that takes a kind refuses the core `Secret` kind
 under any spelling (kind `Secret` or resource `secrets` in any case, short

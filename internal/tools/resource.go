@@ -15,8 +15,10 @@ import (
 
 // errSecretRefused is returned, before any object is read, for every request
 // that names the core Secret kind in any spelling.
-var errSecretRefused = errors.New("refused: this server never reads or returns Secret objects (kind Secret, resource secrets); " +
-	"use RBAC-visible metadata such as a pod's volumes or envFrom references instead")
+// It wraps kube.ErrRefused, so the error header is the fixed refusal class
+// and hint, not "the tool failed".
+var errSecretRefused = fmt.Errorf("%w: this server never reads or returns Secret objects (kind Secret, resource secrets); "+
+	"use RBAC-visible metadata such as a pod's volumes or envFrom references instead", kube.ErrRefused)
 
 // clientFor returns the client of a kubeconfig context, explaining the
 // allowlist when the context is not on it.

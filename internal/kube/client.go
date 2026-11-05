@@ -163,6 +163,9 @@ var (
 	ErrTimeout            = errors.New("API request timed out")
 	ErrUnreachable        = errors.New("cannot reach the API server (connection, DNS or TLS error)")
 	ErrCredentialPlugin   = errors.New("kubeconfig credential plugin (exec) failed")
+	// ErrRefused marks a request the server refuses by policy (a Secret
+	// under any spelling), before or after reading the cluster.
+	ErrRefused = errors.New("refused by server policy")
 )
 
 // KindNotFoundError reports an unknown kind or resource name with up to five

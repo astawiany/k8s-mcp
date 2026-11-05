@@ -249,7 +249,7 @@ func class(err error) string {
 	for _, s := range []error{
 		kube.ErrForbidden, kube.ErrUnauthorized, kube.ErrNotFound, kube.ErrKindNotFound,
 		kube.ErrTimeout, kube.ErrUnreachable, kube.ErrCredentialPlugin,
-		kube.ErrMetricsUnavailable, kube.ErrUnknownContext, kube.ErrContextNotAllowed,
+		kube.ErrMetricsUnavailable, kube.ErrUnknownContext, kube.ErrContextNotAllowed, kube.ErrRefused,
 	} {
 		if errors.Is(err, s) {
 			return s.Error()
@@ -271,7 +271,7 @@ func hint(err error) string {
 	case errors.As(err, &knf) && len(knf.Suggestions) > 0:
 		return "retry with one of the close matches listed in the detail below."
 	case errors.Is(err, kube.ErrKindNotFound):
-		return "check the spelling; cluster_info lists the API groups served by this cluster."
+		return "check the spelling; for a custom resource, list_resources kind=customresourcedefinitions lists the CRDs this cluster serves."
 	case errors.Is(err, kube.ErrForbidden):
 		return "the kubeconfig identity lacks RBAC permission for this verb and resource. This server cannot change permissions; try another namespace or context, or ask a cluster admin."
 	case errors.Is(err, kube.ErrUnauthorized):
@@ -288,6 +288,8 @@ func hint(err error) string {
 		return "the top tool needs metrics-server; use workload_health or describe_resource instead."
 	case errors.Is(err, kube.ErrUnknownContext):
 		return "call list_contexts for the available context names."
+	case errors.Is(err, kube.ErrRefused):
+		return "this server never returns Secrets; do not retry with another spelling."
 	case errors.Is(err, kube.ErrContextNotAllowed):
 		return "call list_contexts and use a context marked allowed; the allowlist is fixed when the server starts."
 	}

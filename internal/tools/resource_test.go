@@ -68,6 +68,13 @@ func TestSecretRefusedByEveryTool(t *testing.T) {
 				if !strings.Contains(text, "Secret") || !strings.Contains(text, "refused") {
 					t.Errorf("error must say that Secrets are refused:\n%s", text)
 				}
+				// The refusal is its own class, with a fixed hint outside the
+				// data envelope (not "the tool failed").
+				head, _, _ := strings.Cut(text, "<<<DATA ")
+				wantHead := "error: " + kube.ErrRefused.Error() + "\nhint: this server never returns Secrets; do not retry with another spelling.\n"
+				if !strings.HasPrefix(head, wantHead) {
+					t.Errorf("refusal header:\n%s\nwant prefix:\n%s", head, wantHead)
+				}
 				if strings.Contains(text, secretValue) {
 					t.Errorf("Secret data leaked:\n%s", text)
 				}
