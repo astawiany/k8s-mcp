@@ -70,15 +70,16 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout io.Writ
 		fmt.Fprintf(stderr, "k8s-mcp: unexpected argument %q (flags only; see --help)\n", fs.Arg(0))
 		return 2
 	}
-	if *showVersion {
-		fmt.Fprintln(stdout, version)
-		return 0
-	}
-
+	// Every flag is validated before --version prints, so a bad flag is
+	// never hidden behind a successful exit.
 	allow, err := kube.ParseAllowlist(*contexts)
 	if err != nil {
 		fmt.Fprintf(stderr, "k8s-mcp: invalid --contexts: %v\n", err)
 		return 2
+	}
+	if *showVersion {
+		fmt.Fprintln(stdout, version)
+		return 0
 	}
 	// The kubeconfig error may name the file; it goes to stderr only, at
 	// startup, never into a tool result.

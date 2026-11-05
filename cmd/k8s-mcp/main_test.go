@@ -142,6 +142,9 @@ func TestInvalidFlagsExitNonZeroWithMessageOnStderr(t *testing.T) {
 		want string
 	}{
 		{"bad glob", []string{"--contexts", "kind-["}, "--contexts"},
+		// Flags are validated before --version prints anything.
+		{"bad glob with --version", []string{"--version", "--contexts", "["}, "--contexts"},
+		{"bad glob before --version", []string{"--contexts", "[", "--version"}, "--contexts"},
 		{"unknown flag", []string{"--write"}, "write"},
 		{"positional arg", []string{"extra"}, "unexpected argument"},
 		{"missing kubeconfig", []string{"--kubeconfig", "/nonexistent/k8s-mcp-test/config"}, "kubeconfig"},
