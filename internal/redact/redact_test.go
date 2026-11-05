@@ -661,7 +661,7 @@ func TestObjectAnnotationJSONStringHoldsSecretManifest(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			key := "a/b"
 			if name == "last-applied string" {
-				key = lastAppliedAnnotation
+				key = LastAppliedAnnotation
 			}
 			o := map[string]any{"kind": "ConfigMap", "metadata": map[string]any{"name": "c",
 				"annotations": map[string]any{key: v}}}

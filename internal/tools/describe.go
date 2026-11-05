@@ -8,6 +8,7 @@ import (
 
 	"github.com/astawiany/k8s-mcp/internal/kube"
 	"github.com/astawiany/k8s-mcp/internal/limits"
+	"github.com/astawiany/k8s-mcp/internal/redact"
 	"github.com/astawiany/k8s-mcp/internal/server"
 )
 
@@ -15,9 +16,6 @@ import (
 // kept); well under limits.Default().MaxItems so the object still fits the
 // 64 KiB document cap.
 const describeMaxEvents = 50
-
-// lastApplied duplicates the spec; describe_resource drops it.
-const lastApplied = "kubectl.kubernetes.io/last-applied-configuration"
 
 type conditionOut struct {
 	Type               string `json:"type"`
@@ -108,7 +106,7 @@ func trimObject(obj map[string]any) map[string]any {
 	if ann := asMap(md["annotations"]); len(ann) > 0 {
 		kept := map[string]any{}
 		for k, v := range ann {
-			if k != lastApplied {
+			if k != redact.LastAppliedAnnotation { // duplicates the spec; dropped
 				kept[k] = v
 			}
 		}

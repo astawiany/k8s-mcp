@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -176,7 +175,7 @@ func capDocument(boundary, doc string) string {
 	note := limits.Note(fmt.Sprintf("result exceeds %d bytes", max), narrowHint)
 	budget := max - envelopeOverhead - len(note) - 1
 	for budget > 0 {
-		out := cutRunes(doc, budget) + "\n" + note
+		out := limits.CutRunes(doc, budget) + "\n" + note
 		over := len(untrusted.Escape(boundary, out)) + envelopeOverhead - max
 		if over <= 0 {
 			return out
@@ -184,18 +183,6 @@ func capDocument(boundary, doc string) string {
 		budget -= over
 	}
 	return note
-}
-
-// cutRunes returns the longest prefix of s of at most n bytes that does not
-// split a rune.
-func cutRunes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
 }
 
 // errorResult turns a handler error into an IsError result with errorText.

@@ -67,7 +67,7 @@ type healthOut struct {
 	Rollout   healthRollout   `json:"rollout"`
 	Pods      []healthPod     `json:"pods"`
 	Findings  []healthFinding `json:"findings"`
-	Truncated bool            `json:"truncated,omitempty"`
+	Truncated bool            `json:"truncated"`
 	Note      string          `json:"note,omitempty"`
 }
 

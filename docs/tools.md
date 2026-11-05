@@ -47,7 +47,10 @@ themselves (env values, probe headers and command flags with credential
 names or token shapes), and remove `metadata.managedFields`.
 
 **Item caps.** List-like results return at most 200 items and say so with
-`truncated: true` (and `total` or `continue` where the API gives one).
+`truncated: true` (and `total` or `continue` where the API gives one). The
+`truncated` field is always present in the results of `cluster_info` (as
+`nodes.truncated`), `list_resources`, `get_events`, `pod_logs`, `top`,
+`workload_health` and `flux_status`; `false` means nothing was cut.
 
 **Timeout.** Every API request has a 15 second timeout.
 

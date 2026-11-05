@@ -146,7 +146,9 @@ import (
 // Redacted replaces every hidden value.
 const Redacted = "[redacted]"
 
-const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
+// LastAppliedAnnotation holds the last applied manifest (kubectl apply); a
+// Secret inside it is masked, and describe_resource drops it.
+const LastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
 
 // IsSecretKind reports whether group/kind names the core Secret kind, its
 // plural resource name or its list kind.
@@ -335,7 +337,7 @@ func scrubMetadata(md map[string]any) {
 			continue
 		}
 		for ak, av := range ann {
-			if normKey(ak) == lastAppliedAnnotation {
+			if normKey(ak) == LastAppliedAnnotation {
 				ann[ak] = scrubJSONString(av, true)
 			} else {
 				ann[ak] = scrubJSONString(av, false)

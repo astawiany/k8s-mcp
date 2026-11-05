@@ -18,8 +18,8 @@ import (
 	"unicode/utf8"
 )
 
-// lineCut is appended to a line that was cut at MaxLineLen.
-const lineCut = "…[line truncated]"
+// LineCut is appended to a line that was cut at MaxLineLen.
+const LineCut = "…[line truncated]"
 
 // Limits holds the output caps.
 type Limits struct {
@@ -39,9 +39,9 @@ func Note(reason, hint string) string {
 	return fmt.Sprintf("[truncated: %s; narrow with %s]", reason, hint)
 }
 
-// cutRunes returns the longest prefix of s that is at most n bytes and does
+// CutRunes returns the longest prefix of s that is at most n bytes and does
 // not split a multi-byte rune.
-func cutRunes(s string, n int) string {
+func CutRunes(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
@@ -82,7 +82,7 @@ func TruncateText(s string, l Limits) (out string, truncated bool) {
 			rest = ""
 		}
 		if l.MaxLineLen > 0 && len(line) > l.MaxLineLen {
-			line = cutRunes(line, l.MaxLineLen) + lineCut
+			line = CutRunes(line, l.MaxLineLen) + LineCut
 			cutLines = true
 		}
 		b.WriteString(line)
@@ -111,7 +111,7 @@ func TruncateText(s string, l Limits) (out string, truncated bool) {
 
 	body := b.String()
 	if l.MaxBytes > 0 {
-		body = cutRunes(body, l.MaxBytes-len(marker)-1)
+		body = CutRunes(body, l.MaxBytes-len(marker)-1)
 	}
 	if body != "" && !strings.HasSuffix(body, "\n") {
 		body += "\n"

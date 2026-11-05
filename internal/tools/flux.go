@@ -73,7 +73,7 @@ type fluxOut struct {
 	BlockedBy    []fluxBlocked `json:"blockedBy,omitempty"`
 	Summary      *fluxSummary  `json:"summary,omitempty"`
 	MissingKinds []string      `json:"missingKinds,omitempty"`
-	Truncated    bool          `json:"truncated,omitempty"`
+	Truncated    bool          `json:"truncated"`
 	Note         string        `json:"note,omitempty"`
 }
 

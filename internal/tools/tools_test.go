@@ -3,6 +3,7 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -38,6 +39,28 @@ func TestRegisterAllUsesReadCapOnly(t *testing.T) {
 	for _, sp := range s.Tools() {
 		if sp.Cap != server.CapRead {
 			t.Errorf("tool %s has capability %q", sp.Name, sp.Cap)
+		}
+	}
+}
+
+// TestTruncatedIsAlwaysPresent: every list-like tool returns "truncated",
+// false included, so models and scripts can rely on the field.
+func TestTruncatedIsAlwaysPresent(t *testing.T) {
+	cases := []struct {
+		tool string
+		args map[string]any
+		objs []map[string]any
+		want string
+	}{
+		{"cluster_info", nil, []map[string]any{node("n1", "True")}, `"truncated":false`},
+		{"workload_health", map[string]any{"namespace": "app", "kind": "Deployment", "name": "web"},
+			[]map[string]any{hDeploy(1, 1), hRS("web-1", 1), hPod("web-1-a", "web-1", "Running", true, nil, nil)}, `"truncated":false`},
+		{"flux_status", nil, []map[string]any{fObj("kustomize.toolkit.fluxcd.io/v1", "Kustomization", "f", "k", true, "ok", "", nil)}, `"truncated":false`},
+	}
+	for _, c := range cases {
+		body := servertest.Payload(t, callTool(t, kube.SingleFakeFactory(kube.NewFakeClient(c.objs...)), c.tool, c.args))
+		if !strings.Contains(body, c.want) {
+			t.Errorf("%s: %s missing in %s", c.tool, c.want, body)
 		}
 	}
 }

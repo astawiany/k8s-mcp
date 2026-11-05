@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -34,8 +33,6 @@ const (
 	// encoding and envelope escaping produce), so that the document stays
 	// under the 64 KiB cap with room for the other fields.
 	logBudget = 56 * 1024
-	// lineCut ends a line cut at the line-length limit (as in limits).
-	lineCut = "…[line truncated]"
 	// keyBlockLine replaces a whole private key block.
 	keyBlockLine = "[redacted: private key block]"
 	// redactedLine replaces a whole log line holding a credential-looking value.
@@ -166,7 +163,7 @@ func podLogs(ctx context.Context, f kube.Factory, in logsIn) (any, error) {
 			s = redactedLine
 			out.RedactedLines++
 		case len(s) > lim.MaxLineLen:
-			s = cutRunes(s, lim.MaxLineLen-len(lineCut)) + lineCut
+			s = limits.CutRunes(s, lim.MaxLineLen-len(limits.LineCut)) + limits.LineCut
 			cutLines = true
 		}
 		clean[i], lines[i] = s, l.raw
@@ -277,18 +274,6 @@ func encodedLen(s string) int {
 		return len(s) * 6
 	}
 	return len(b) - 2
-}
-
-// cutRunes returns the longest prefix of s of at most n bytes that does not
-// split a rune.
-func cutRunes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
 }
 
 // logLine is one line as a client sees it (clean) with the raw text it came

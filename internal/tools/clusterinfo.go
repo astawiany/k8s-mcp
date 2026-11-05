@@ -22,7 +22,7 @@ type nodeSummary struct {
 	Ready    int      `json:"ready"`
 	NotReady []string `json:"notReady"`
 	// Truncated is set when notReady holds only the first names.
-	Truncated bool `json:"truncated,omitempty"`
+	Truncated bool `json:"truncated"`
 	// TotalIsLowerBound is set when not every node was counted.
 	TotalIsLowerBound bool `json:"totalIsLowerBound,omitempty"`
 }
