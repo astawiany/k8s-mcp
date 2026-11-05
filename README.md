@@ -157,8 +157,15 @@ a kubeconfig mounted into it:
 
 ```sh
 claude mcp add k8s -- docker run -i --rm -v ~/.kube/config:/kube/config:ro \
-  ghcr.io/astawiany/k8s-mcp:<tag> --kubeconfig /kube/config --contexts 'kind-*'
+  ghcr.io/astawiany/k8s-mcp:<tag> --kubeconfig /kube/config --contexts '<your-context>'
 ```
+
+Network note: inside the container `127.0.0.1` is the container itself, so a
+kubeconfig whose API server is `https://127.0.0.1:<port>` (the default for
+kind and for most local clusters) is unreachable. For a local kind cluster, run
+the binary directly instead (`make build`), or export a kubeconfig that points
+at an address the container can reach (`kind get kubeconfig --internal`, with
+`--network kind` added to `docker run`).
 
 Prefer the verified digest over the tag (see
 [docs/security.md](docs/security.md#verifying-releases)). The image is
