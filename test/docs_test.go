@@ -23,11 +23,39 @@ func repoRoot(t *testing.T) string {
 	return strings.TrimSpace(string(out))
 }
 
+// employerPattern matches the forbidden employer names. It is assembled from
+// fragments so this file never contains the names.
+func employerPattern() *regexp.Regexp {
+	return regexp.MustCompile(`(?i)(` + "Deutsche" + `\s+` + "Tele" + "kom" + `|` + "T" + `-` + "Mobile" + `|` + "Tele" + "kom" + `)`)
+}
+
+// TestEmployerPatternSelfTest: the pattern matches each name (built from
+// fragments, in any case and spacing) and does not match benign text, so the
+// scan below cannot pass vacuously.
+func TestEmployerPatternSelfTest(t *testing.T) {
+	pat := employerPattern()
+	for _, s := range []string{
+		"worked at " + "Deutsche" + " " + "Tele" + "kom" + " AG",
+		"DEUTSCHE" + "\t" + "TELE" + "KOM",
+		"T" + "-" + "Mobile" + " US",
+		"t" + "-" + "mobile",
+		"tele" + "kom" + "-cloud",
+	} {
+		if !pat.MatchString(s) {
+			t.Errorf("pattern does not match %q", s)
+		}
+	}
+	for _, s := range []string{"telecommunications", "Deutsche Bahn", "kubernetes telemetry", "mobile app", "T Mobile", "kind-telemetry"} {
+		if pat.MatchString(s) {
+			t.Errorf("pattern matches benign text %q", s)
+		}
+	}
+}
+
 // TestNoEmployerNames scans every tracked or untracked-but-not-ignored file.
-// The pattern is assembled from fragments so this file never contains the names.
 func TestNoEmployerNames(t *testing.T) {
 	root := repoRoot(t)
-	pat := regexp.MustCompile(`(?i)(` + "Deutsche" + `\s+` + "Tele" + "kom" + `|` + "T" + `-` + "Mobile" + `|` + "Tele" + "kom" + `)`)
+	pat := employerPattern()
 	cmd := exec.Command("git", "ls-files", "-co", "--exclude-standard")
 	cmd.Dir = root
 	out, err := cmd.Output()
@@ -62,10 +90,10 @@ func TestLicenseIsMIT(t *testing.T) {
 
 var mdLink = regexp.MustCompile(`\]\(([^)\s]+)\)`)
 
-// docFiles are the user-facing Markdown files whose links are checked.
+// docFiles are the Markdown files whose links are checked.
 func docFiles(t *testing.T, root string) []string {
 	t.Helper()
-	files := []string{"README.md"}
+	files := []string{"README.md", "STATUS.md", ".github/README.md", "test/injection/eval/README.md"}
 	more, err := filepath.Glob(filepath.Join(root, "docs", "*.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -77,12 +105,12 @@ func docFiles(t *testing.T, root string) []string {
 	return files
 }
 
-// TestMarkdownLinksResolve checks every relative link in README.md and
-// docs/*.md, resolved against the linking file's directory.
+// TestMarkdownLinksResolve checks every relative link in the README files,
+// STATUS.md and docs/*.md, resolved against the linking file's directory.
 func TestMarkdownLinksResolve(t *testing.T) {
 	root := repoRoot(t)
 	files := docFiles(t, root)
-	for _, want := range []string{"docs/tools.md", "docs/threat-model.md", "docs/security.md"} {
+	for _, want := range []string{"docs/tools.md", "docs/threat-model.md", "docs/security.md", ".github/README.md", "test/injection/eval/README.md"} {
 		if !slices.Contains(files, want) {
 			t.Errorf("%s is missing", want)
 		}
@@ -165,21 +193,27 @@ func TestReadmeEssentials(t *testing.T) {
 // TestThreatModelStatesResidualRisks: every residual risk ruled in the
 // stage 1 ledger is named.
 func TestThreatModelStatesResidualRisks(t *testing.T) {
-	tm := strings.ToLower(readDoc(t, "docs/threat-model.md"))
+	// Whitespace collapsed: phrases may wrap across lines.
+	tm := strings.ToLower(strings.Join(strings.Fields(readDoc(t, "docs/threat-model.md")), " "))
 	for _, want := range []string{
-		"private key",      // tail window starting inside a key
-		"fail-closed",      // pod_logs over-hiding
-		"prompt injection", // residual model influence
-		"exec plugin",      // stderr, hung plugins
-		"defence in depth", // heuristics vs RBAC
-		"split",            // tokens split across lines
-		"arn:*/*",          // path.Match globs
-		"allowlist",        // ErrContextNotAllowed lists it
-		"autolink",         // draft_issue bare URLs
-		"confused deputy",  // stage 3 ticketing
-		"behavioural eval", // evidence, not guarantee
-		"fixed-point",      // draft_issue masking loop
-		"go 1.26",          // toolchain floor
+		"private key",                // tail window starting inside a key
+		"fail-closed",                // pod_logs over-hiding
+		"prompt injection",           // residual model influence
+		"exec plugin",                // stderr, hung plugins
+		"defence in depth",           // heuristics vs RBAC
+		"split across two log lines", // tokens split across lines
+		"arn:*/*",                    // path.Match globs
+		"allowlist",                  // ErrContextNotAllowed lists it
+		"autolink",                   // draft_issue bare URLs
+		"confused deputy",            // stage 3 ticketing
+		"behavioural eval",           // evidence, not guarantee
+		"fixed-point",                // draft_issue masking loop
+		"go 1.26",                    // toolchain floor
+		"hiddenreason",               // pod_logs whole-text token trigger
+		"lone backslash",             // draft_issue summary line cut after escaping
+		"plus a 1 second grace",      // exec plugin abandonment budget
+		"dedicated `--kubeconfig`",   // list_contexts shows every context name
+		"only in pod logs",           // kind integration plants payloads in logs only
 	} {
 		if !strings.Contains(tm, want) {
 			t.Errorf("docs/threat-model.md does not mention %q", want)

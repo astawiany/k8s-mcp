@@ -75,7 +75,7 @@ Each safety test is shown to fail with its control removed when it is added
 | Logs: private key blocks and token lines masked; a log that looks like a Secret manifest withheld | 2 | `internal/tools/logs_test.go`, `internal/redact/privatekey_test.go` |
 | Data envelope with a per-call random boundary that content cannot close; server instructions say envelope content is data | 4 | `internal/untrusted` tests (`TestWrapSpoof`), `TestEnvelopeCannotBeClosedFromInside` |
 | Control, ANSI, zero-width and bidi characters stripped; per-string and per-document caps; item caps | 4 | `internal/untrusted` tests, `internal/limits` tests, `TestHugeStringIsCappedSingleEnvelope`, `TestWholeDocumentCap` |
-| Injection corpus planted in every untrusted field type, through every tool that returns it | 2, 4 | `test/injection/injection_test.go` (`TestInjectionCorpus`) |
+| Injection corpus planted in every untrusted field type, through every tool that returns it | 2, 4 | `test/injection/injection_test.go` (`TestInjectionCorpus`, in-process fake cluster); on kind, `test/integration` plants a payload in pod logs only (see residual risks) |
 | Errors: only fixed server sentences outside the envelope; cluster text inside it, sanitised and redacted | 2, 4 | `internal/server/errortext_test.go`, `TestErrorTextClusterDetailOnlyInEnvelope`, `TestErrorHeaderHoldsNoClusterText` |
 | Kubeconfig content never returned; transport errors stripped of connection details | 3 | `TestListContexts`, `internal/kube/leak_test.go`, `TestFactoryBrokenContextErrorHasNoSecrets` |
 | Context allowlist (`--contexts`) | 1, 2 | `internal/kube/allowlist_test.go`, `TestContextsAllowlistWithNoMatchAllowsNothing` (built binary) |
@@ -103,9 +103,8 @@ user then files somewhere (see the confused deputy note below).
 The behavioural eval in `test/injection/eval/` measures how a model reacts
 to planted payloads. It is evidence, not a guarantee: a pass rate holds for
 one model, one date and one prompt, and it needs an API key and a cluster,
-so it does not gate CI. At the time of writing it has not yet been run
-against a real model and cluster; results will be recorded with model and
-date when it is.
+so it does not gate CI. Whether it has been run, and with which model and
+date, is recorded in [STATUS.md](../STATUS.md).
 
 ## Confused deputy: tickets and stage 3
 
@@ -165,10 +164,13 @@ Known gaps:
 - `describe_resource` does not show ConfigMap `data` or Role `rules`; use
   `get_resource`.
 
-**Fail-closed over-hiding in `pod_logs`.** A log that looks like a Kubernetes
-Secret manifest is withheld whole, not line by line. Logs of controllers that
-print manifests can be unreadable through the tool. This trades usability for
-safety on purpose; the result says it was hidden and why.
+**Fail-closed over-hiding in `pod_logs`.** A log is withheld whole, not line
+by line, for two reasons: it looks like a Kubernetes Secret manifest, or the
+text as a whole matches a credential pattern that no single line does (for
+example base64 text over several lines that decodes to a token; the result's
+`hiddenReason` says so). Logs of controllers that print manifests can be
+unreadable through the tool. This trades usability for safety on purpose; the
+result says it was hidden and why.
 
 **`draft_issue`.** Bare URLs in text may still be autolinked by the viewer
 (GitHub, Jira), even though no link markup is generated. Credential masking
@@ -177,23 +179,42 @@ them is replaced by a fixed note (fail closed). The assembled description and
 summary line get the wrapper's whole-string checks inside the tool, so a field
 withheld because words of several fields combined is named in `warnings`
 instead of the wrapper blanking the whole description. A few line-start
-constructs (`bq.`, `1)`) are not escaped.
+constructs (`bq.`, `1)`) are not escaped. Escaping has visible side effects:
+quotes inside the fenced block keep their backslash escapes (Markdown shows
+them literally, because Jira wiki markup would otherwise interpret the
+quote), and the summary line is cut after escaping, so it can end in a lone
+backslash.
 
 **Credential plugins (kubeconfig exec plugin).** An exec plugin (for example
 a cloud CLI) runs as a child of client-go when a context is used. It runs
 non-interactively and never sees the protocol pipe, but its stderr goes to the
 server's stderr, which the MCP host may show or log. A plugin may make its own
 network calls to its identity provider; that is outside this server's "no
-network path but the clusters" claim. A plugin that hangs is abandoned at the
-15 second request timeout, but its goroutine stays; repeated calls against a
+network path but the clusters" claim. A plugin that hangs is abandoned when
+the request budget runs out: the request timeout (15 seconds) plus a 1 second
+grace, and for API discovery twice the timeout plus 1 second (31 seconds). Its
+goroutine stays; repeated calls against a
 permanently hung plugin accumulate goroutines until the server restarts.
 
 **Context allowlist.** Entries are `path.Match` globs, in which `*` does not
 match `/`. EKS contexts named by ARN (`arn:aws:eks:<region>:<account>:cluster/<name>`)
 need `arn:*/*` or a full name. The default, with no `--contexts`, is every
 context in the kubeconfig; restrict it. The error for a context outside the
-allowlist lists the allowlist patterns, so the model sees them (not the names
-of other contexts).
+allowlist lists the allowlist patterns, so the model sees them. The allowlist
+limits which contexts tools can use, not which names the model sees:
+`list_contexts` returns the names (never server URLs or credentials) of every
+context in the kubeconfig, including those outside the allowlist, and EKS
+context names carry the AWS account ID. To hide them, give the server a
+dedicated `--kubeconfig` that holds only the contexts it may use.
+
+**Injection corpus on a real API server.** Spec test layer 1 asks for the
+corpus in each untrusted field type on fake and kind clusters. On kind, the
+integration test plants the injection payload only in pod logs and asserts it
+only through `pod_logs` (the fixture ConfigMap that feeds the pod is not read
+back through `get_resource`), a recorded deviation from the spec; annotations,
+labels, event messages, ConfigMap values and env values are covered by the
+in-process corpus over the fake cluster (`TestInjectionCorpus`). A difference
+in how a real API server encodes those fields would not be caught.
 
 **Kubeconfig errors at startup.** A kubeconfig that cannot be loaded is
 reported on stderr at startup and may quote its path; such text never goes
