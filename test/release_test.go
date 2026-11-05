@@ -613,6 +613,7 @@ func TestReleaseNotesCarryVerificationCommands(t *testing.T) {
 		"cosign verify " + ref, "--certificate-identity " + id, "--certificate-oidc-issuer " + issuer,
 		"cosign verify-blob --bundle SHA256SUMS.sigstore.json", "cosign verify-blob --bundle k8s-mcp_v1.2.3_linux_amd64.tar.gz.sigstore.json",
 		"sha256sum --ignore-missing -c SHA256SUMS", "docs/security.md",
+		"creates the GHCR package as private", "not for anonymous users",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("notes lack %q:\n%s", want, out)
@@ -1137,9 +1138,21 @@ func TestSecurityDocReleaseVerification(t *testing.T) {
 		"reproducible",
 		"SLSA",
 		"point-in-time",
-		"No release has been published yet",
+		"k8s-mcp_<tag>_<os>_<arch>.tar.gz",
+		"ghcr.io/astawiany/k8s-mcp:<tag>",
 	} {
 		if !strings.Contains(doc, want) {
+			t.Errorf("docs/security.md lacks %q", want)
+		}
+	}
+	// Sentences that wrap across lines: compare with whitespace collapsed.
+	flat := strings.Join(strings.Fields(doc), " ")
+	for _, want := range []string{
+		"a re-run can never overwrite an existing tag or release",
+		"If a run half-published (a job failed after something was pushed), do not re-run it: bump the version",
+		"fail for anonymous consumers until you make the package public",
+	} {
+		if !strings.Contains(flat, want) {
 			t.Errorf("docs/security.md lacks %q", want)
 		}
 	}
@@ -1147,9 +1160,29 @@ func TestSecurityDocReleaseVerification(t *testing.T) {
 		t.Error("docs/security.md still has the stub text or mentions :latest")
 	}
 	readme := readDoc(t, "README.md")
-	for _, want := range []string{"k8s-mcp_<version>_<os>_<arch>.tar.gz", "SHA256SUMS", ".sigstore.json", "ghcr.io/astawiany/k8s-mcp", "No release has been published yet"} {
+	for _, want := range []string{"k8s-mcp_<tag>_<os>_<arch>.tar.gz", "SHA256SUMS", ".sigstore.json", "ghcr.io/astawiany/k8s-mcp:<tag>",
+		"https://github.com/astawiany/k8s-mcp/releases", ".github/workflows/release.yml"} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README.md \"From a release\" lacks %q", want)
 		}
+	}
+}
+
+// TestReleasedDocsAreTimeIndependent: README.md is copied into every release archive and the
+// Release notes link docs/security.md at the tag, so neither may say something that is true only
+// until the first release ("no release yet", "not run on GitHub"). Dated status lives in
+// STATUS.md, which the archives do not carry (TestReleaseBuildBinary lists their exact content).
+func TestReleasedDocsAreTimeIndependent(t *testing.T) {
+	for _, f := range []string{"README.md", "docs/security.md"} {
+		doc := strings.ToLower(readDoc(t, f))
+		for _, bad := range []string{"no release has been published", "not run on github", "has not run", "at the time of writing", "not yet", "will carry"} {
+			if strings.Contains(doc, bad) {
+				t.Errorf("%s says %q, which goes stale once a release exists; put dated status in STATUS.md", f, bad)
+			}
+		}
+	}
+	status := readDoc(t, "STATUS.md")
+	if !regexp.MustCompile(`(?m)^As of \d{4}-\d{2}-\d{2}:`).MatchString(status) {
+		t.Error("STATUS.md has no dated \"As of YYYY-MM-DD:\" line")
 	}
 }

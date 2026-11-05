@@ -303,6 +303,9 @@ cosign verify $ref \\
 docker buildx imagetools inspect $ref --format '{{json .SBOM}}'
 docker buildx imagetools inspect $ref --format '{{json .Provenance}}'
 \`\`\`
+
+The first release creates the GHCR package as private: until the maintainer makes the package
+public, the image commands work only for accounts with access to it, not for anonymous users.
 EOF
 }
 

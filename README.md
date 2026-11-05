@@ -16,12 +16,15 @@ License: MIT, see [LICENSE](LICENSE).
 
 ## Install
 
-**From a release.** No release has been published yet. Each release
-`vX.Y.Z` will carry static binaries `k8s-mcp_<version>_<os>_<arch>.tar.gz`
-(linux and darwin, amd64 and arm64), `SHA256SUMS` and a `.sigstore.json`
-cosign bundle for each of them, plus the image
-`ghcr.io/astawiany/k8s-mcp:vX.Y.Z` (linux/amd64, distroless, signed). Verify
-before use: [docs/security.md](docs/security.md#verifying-releases).
+**From a release.** Release artefacts are produced by
+`.github/workflows/release.yml`; check the
+[Releases page](https://github.com/astawiany/k8s-mcp/releases) for published
+versions. A release `<tag>` (a version tag such as `v0.1.0`) carries static
+binaries `k8s-mcp_<tag>_<os>_<arch>.tar.gz` (linux and darwin, amd64 and
+arm64), `SHA256SUMS` and a `.sigstore.json` cosign bundle for each of them,
+plus the image `ghcr.io/astawiany/k8s-mcp:<tag>` (linux/amd64, distroless,
+signed). Verify before use:
+[docs/security.md](docs/security.md#verifying-releases).
 
 **From source** (Go 1.26 or newer):
 
@@ -55,7 +58,12 @@ errors, credential plugin output) goes to stderr. An invalid flag or
 kubeconfig stops the server with a message on stderr and a non-zero exit.
 
 Restrict `--contexts` to the clusters you mean to investigate: with no
-allowlist, every context in the kubeconfig is usable.
+allowlist, every context in the kubeconfig is usable. `--contexts` limits
+which contexts the tools can use, not which names the model sees:
+`list_contexts` returns the names (never URLs or credentials) of every context
+in the kubeconfig, including those outside the allowlist, and names can carry
+account IDs (EKS ARNs). To hide them, point `--kubeconfig` at a dedicated
+kubeconfig that holds only the contexts you want to expose.
 
 ## Tools
 
@@ -135,6 +143,28 @@ contents, tokens or credential plugin output in a tool result.
 - `make lint` - gofmt check, `go vet`, staticcheck, yamllint
 - `make test` - `go test ./...` (unit, protocol, injection corpus, built-binary stdio tests)
 - `make vuln` - govulncheck
+- `make integration` - kind integration tests (needs Docker, kind, kubectl
+  and curl; creates the throwaway cluster `k8s-mcp-it` and always deletes it;
+  about 75 seconds)
 
 Tool versions are pinned in [versions.env](versions.env). Security notes:
-[docs/security.md](docs/security.md).
+[docs/security.md](docs/security.md). The dated status of the CI and release
+workflows and of the behavioural eval: [STATUS.md](STATUS.md).
+
+**Running the published image** (example, adjust the tag and paths). The
+server talks MCP over stdin/stdout, so the container needs `-i`, and it reads
+a kubeconfig mounted into it:
+
+```sh
+claude mcp add k8s -- docker run -i --rm -v ~/.kube/config:/kube/config:ro \
+  ghcr.io/astawiany/k8s-mcp:<tag> --kubeconfig /kube/config --contexts 'kind-*'
+```
+
+Prefer the verified digest over the tag (see
+[docs/security.md](docs/security.md#verifying-releases)). The image is
+distroless and contains no credential-plugin binaries (`aws`, `gcloud`,
+`kubelogin`, ...), so contexts that use an exec plugin fail inside it; mount a
+kubeconfig that uses a token or client certificate instead, such as the one
+built in "A read-only identity" above. A kubeconfig that refers to files
+outside it (CA or key paths) needs those mounted too, or embedded
+(`--embed-certs`).
