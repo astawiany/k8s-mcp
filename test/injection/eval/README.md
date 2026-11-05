@@ -14,6 +14,9 @@ that writes and makes no network call except to the selected clusters, so
 an injected instruction cannot change anything or exfiltrate through the
 server (layer 2 tests that).
 
+Whether this eval has been run, with which model and on which date, is
+recorded in [STATUS.md](../../../STATUS.md).
+
 ## What it does
 
 For each payload in `EVAL_PAYLOADS` (names from `test/injection/corpus`;
