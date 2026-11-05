@@ -261,7 +261,9 @@ CPU, highest first. Pod rows add `cpuPercentOfRequests` and
 `memoryPercentOfRequests` when every container of the pod declares that
 request.
 
-**Limits.** At most 200 rows. Without metrics-server the result is
+**Limits.** At most 200 rows. Pod specs (for the percentages) are read for
+at most 10000 pods (20 pages of 500); beyond that the percentages are partial
+and `note` says so. Without metrics-server the result is
 `{available: false, message}`, not an error.
 
 **Refusals.** Any other `scope`.

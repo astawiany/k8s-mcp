@@ -55,7 +55,8 @@ func registerTop(s *server.Server) {
 		Description: "Current CPU and memory usage from the metrics API (metrics-server), like kubectl top. " +
 			"scope nodes or pods (pods optionally in one namespace). Rows {name, namespace, cpu, memory, " +
 			"cpuMillicores, memoryBytes} sorted by CPU, highest first; pod rows add cpuPercentOfRequests and " +
-			"memoryPercentOfRequests when every container of the pod declares that request. At most 200 rows " +
+			"memoryPercentOfRequests when every container of the pod declares that request (pod specs are read for at most " +
+			"10000 pods; note says when percentages are partial). At most 200 rows " +
 			"(truncated=true and total when more). Without metrics-server the result is {available: false, " +
 			"message} instead of an error. Read-only: never creates, changes or deletes anything.",
 	}, server.CapRead, top)
@@ -87,9 +88,13 @@ func top(ctx context.Context, f kube.Factory, in topIn) (any, error) {
 	out := topOut{Scope: scope, Available: true, Rows: []topRow{}}
 	var reqs map[string]podRequests
 	if scope == "pods" {
-		reqs, err = readRequests(ctx, c, ns)
-		if err != nil {
+		var partial bool
+		reqs, partial, err = readRequests(ctx, c, ns)
+		switch {
+		case err != nil:
 			out.Note = "pod specs could not be read, so percent of requests is not shown"
+		case partial:
+			out.Note = fmt.Sprintf("pod specs were read for the first %d pods only, so percent of requests is partial (pods beyond them show none); narrow with a namespace", topPageSize*topMaxPages)
 		}
 	}
 	for _, m := range items {
@@ -129,15 +134,27 @@ func top(ctx context.Context, f kube.Factory, in topIn) (any, error) {
 // container does not declare it.
 type podRequests struct{ cpuMilli, memBytes int64 }
 
+// Pod specs are read in pages of topPageSize, at most topMaxPages pages (as
+// cluster_info does for nodes), so a huge cluster cannot make top run an
+// unbounded number of requests.
+const (
+	topPageSize = 500
+	topMaxPages = 20
+)
+
 // readRequests lists the pods in ns and returns their summed requests by
-// "namespace/name". Only these numbers leave this function.
-func readRequests(ctx context.Context, c kube.Client, ns string) (map[string]podRequests, error) {
+// "namespace/name". Only these numbers leave this function. partial is true
+// when more pods exist than the page cap allowed to read.
+func readRequests(ctx context.Context, c kube.Client, ns string) (reqs map[string]podRequests, partial bool, err error) {
 	out := map[string]podRequests{}
-	opts := kube.ListOptions{Limit: 500}
-	for {
+	opts := kube.ListOptions{Limit: topPageSize}
+	for pages := 0; ; pages++ {
+		if pages == topMaxPages {
+			return out, true, nil
+		}
 		page, err := c.List(ctx, kube.Resource{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true}, ns, opts)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, p := range page.Items {
 			var r podRequests
@@ -159,7 +176,7 @@ func readRequests(ctx context.Context, c kube.Client, ns string) (map[string]pod
 			out[str(p, "metadata", "namespace")+"/"+str(p, "metadata", "name")] = r
 		}
 		if page.Continue == "" {
-			return out, nil
+			return out, false, nil
 		}
 		opts.Continue = page.Continue
 	}

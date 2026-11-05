@@ -141,3 +141,30 @@ func TestTopPodsCapAndSort(t *testing.T) {
 		}
 	}
 }
+
+// TestTopPodsRequestReadIsBounded: pod specs are read for at most 20 pages of
+// 500; beyond that the percentages are partial and the note says so.
+func TestTopPodsRequestReadIsBounded(t *testing.T) {
+	var pods []map[string]any
+	for i := 0; i < 10001; i++ {
+		pods = append(pods, testPod("a", fmt.Sprintf("p%05d", i), [3]string{"app", "100m", "128Mi"}))
+	}
+	fc := kube.NewFakeClient(pods...).SetPodMetrics(
+		kube.PodMetric("a", "p00000", map[string][2]string{"app": {"50m", "64Mi"}}),
+		kube.PodMetric("a", "p10000", map[string][2]string{"app": {"50m", "64Mi"}}),
+	)
+	out := top(t, fc, map[string]any{"scope": "pods"})
+	rows := map[string]topRow{}
+	for _, r := range out.Rows {
+		rows[r.Name] = r
+	}
+	if rows["p00000"].CPUPercentOfRequests == nil {
+		t.Errorf("first page pod has no percent: %+v", rows["p00000"])
+	}
+	if rows["p10000"].CPUPercentOfRequests != nil {
+		t.Errorf("pod beyond the page cap has a percent: %+v", rows["p10000"])
+	}
+	if !strings.Contains(out.Note, "partial") {
+		t.Errorf("note does not say percentages are partial: %q", out.Note)
+	}
+}
