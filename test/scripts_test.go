@@ -90,7 +90,8 @@ func newInstallEnv(t *testing.T, payload []byte, uname string) *installEnv {
 	writeStub(t, e.stubs, "curl", `out=""; url=""
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
 echo "$url" >> "$STUB_LOG"
-cp "$STUB_PAYLOAD" "$out"
+# a file named like the URL's last path segment in $STUB_PAYLOAD_DIR wins over the default payload
+if [ -f "$STUB_PAYLOAD_DIR/${url##*/}" ]; then cp "$STUB_PAYLOAD_DIR/${url##*/}" "$out"; else cp "$STUB_PAYLOAD" "$out"; fi
 `)
 	writeStub(t, e.stubs, "uname", `case "$1" in -s) echo "`+strings.Split(uname, "/")[0]+`" ;; -m) echo "`+strings.Split(uname, "/")[1]+`" ;; esac
 `)
@@ -116,7 +117,7 @@ func (e *installEnv) run(t *testing.T, tool string) (string, error) {
 	cmd.Env = []string{
 		"PATH=" + e.stubs + ":/usr/bin:/bin", "HOME=" + e.root,
 		"BIN_DIR=" + e.bin, "GO_ROOT_DIR=" + e.goRoot,
-		"TMPDIR=" + e.tmp, "STUB_PAYLOAD=" + e.payload, "STUB_LOG=" + filepath.Join(e.root, "curl.log"),
+		"TMPDIR=" + e.tmp, "STUB_PAYLOAD=" + e.payload, "STUB_PAYLOAD_DIR=" + filepath.Join(e.root, "payloads"), "STUB_LOG=" + filepath.Join(e.root, "curl.log"),
 	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -211,11 +212,75 @@ func TestInstallerLinuxAmd64OnlyAndUnknownTool(t *testing.T) {
 
 func TestVersionsEnvChecksumsAreWellFormed(t *testing.T) {
 	env := readFileT(t, filepath.Join(repoRoot(t), "versions.env"))
-	for _, key := range []string{"KUBECTL", "KIND", "GO", "TRIVY", "ACTIONLINT"} {
+	for _, key := range []string{"KUBECTL", "KIND", "GO", "TRIVY", "ACTIONLINT", "COSIGN"} {
 		if !regexp.MustCompile(`(?m)^` + key + `_SHA256_LINUX_AMD64=[0-9a-f]{64}$`).MatchString(env) {
 			t.Errorf("versions.env: %s_SHA256_LINUX_AMD64 missing or not 64 hex", key)
 		}
 	}
+}
+
+// servePayload makes the stub curl answer URLs ending in /name with body.
+func (e *installEnv) servePayload(t *testing.T, name string, body []byte) {
+	t.Helper()
+	dir := filepath.Join(e.root, "payloads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// cosign must match both the release's cosign_checksums.txt and the sha256 pinned in versions.env.
+func TestInstallerCosign(t *testing.T) {
+	bin := []byte("#!/bin/sh\necho fake cosign\n")
+	checksums := func(hexsum string) []byte {
+		return []byte(hexsum + "  cosign-darwin-arm64\n" + hexsum + "  cosign-linux-amd64\n" + sum([]byte("x")) + "  cosign-linux-amd64.sig\n")
+	}
+	t.Run("matching pin and checksum file", func(t *testing.T) {
+		e := newInstallEnv(t, bin, "Linux/x86_64")
+		e.servePayload(t, "cosign_checksums.txt", checksums(sum(bin)))
+		e.pin(t, "COSIGN_SHA256_LINUX_AMD64", sum(bin))
+		if out, err := e.run(t, "cosign"); err != nil {
+			t.Fatalf("matching checksums rejected: %v\n%s", err, out)
+		}
+		if !exists(filepath.Join(e.bin, "cosign")) {
+			t.Fatal("cosign not installed")
+		}
+		log := readFileT(t, filepath.Join(e.root, "curl.log"))
+		for _, want := range []string{"github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64", "github.com/sigstore/cosign/releases/download/v3.1.4/cosign_checksums.txt"} {
+			if !strings.Contains(log, want) {
+				t.Fatalf("no download of %s: %s", want, log)
+			}
+		}
+	})
+	t.Run("tampered binary", func(t *testing.T) {
+		e := newInstallEnv(t, []byte("tampered"), "Linux/x86_64")
+		e.servePayload(t, "cosign_checksums.txt", checksums(sum(bin)))
+		e.pin(t, "COSIGN_SHA256_LINUX_AMD64", sum(bin))
+		out, err := e.run(t, "cosign")
+		if err == nil || !strings.Contains(out, "sha256 mismatch") || exists(filepath.Join(e.bin, "cosign")) {
+			t.Fatalf("tampered cosign accepted: err=%v\n%s", err, out)
+		}
+	})
+	t.Run("checksum file disagrees with the pin", func(t *testing.T) {
+		e := newInstallEnv(t, bin, "Linux/x86_64")
+		e.servePayload(t, "cosign_checksums.txt", checksums(sum([]byte("other release"))))
+		e.pin(t, "COSIGN_SHA256_LINUX_AMD64", sum(bin))
+		out, err := e.run(t, "cosign")
+		if err == nil || !strings.Contains(out, "disagrees") || exists(filepath.Join(e.bin, "cosign")) {
+			t.Fatalf("disagreeing checksum file accepted: err=%v\n%s", err, out)
+		}
+		if left, _ := os.ReadDir(e.tmp); len(left) != 0 {
+			t.Fatalf("temp dir left behind: %v", left)
+		}
+	})
+	t.Run("linux/amd64 only", func(t *testing.T) {
+		e := newInstallEnv(t, bin, "Darwin/arm64")
+		if out, err := e.run(t, "cosign"); err == nil || !strings.Contains(out, "linux/amd64 only") {
+			t.Fatalf("cosign on darwin: err=%v\n%s", err, out)
+		}
+	})
 }
 
 // --- protect-branch.sh -------------------------------------------------------------------

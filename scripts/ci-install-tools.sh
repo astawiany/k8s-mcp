@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Install pinned CI tools. Usage: scripts/ci-install-tools.sh <tool>...
-#   (staticcheck govulncheck yamllint kubectl kind go trivy actionlint)
+#   (staticcheck govulncheck yamllint kubectl kind go trivy actionlint cosign)
 # Versions come from versions.env. Go tools are built from source by `go install` at a pinned
 # version (module checksums verified by the Go checksum database); yamllint comes from pipx
 # at an exact pinned version. Binary downloads are sha256-verified against a pin in versions.env
-# before install (kubectl, kind, trivy, actionlint: linux/amd64 only, into $BIN_DIR, default ~/.local/bin; go: into
-# $GO_ROOT_DIR, default ~/.local/go-<version>, binaries in its go/bin).
+# before install (kubectl, kind, trivy, actionlint, cosign: linux/amd64 only, into $BIN_DIR, default ~/.local/bin; go:
+# into $GO_ROOT_DIR, default ~/.local/go-<version>, binaries in its go/bin). cosign signs the releases, so
+# it must match both COSIGN_SHA256_LINUX_AMD64 and the cosign_checksums.txt of its release.
 set -euo pipefail
 
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
@@ -73,6 +74,23 @@ install_kind() {
   rm -rf "$tmp"
 }
 
+install_cosign() {
+  local tmp b listed
+  require_linux_amd64 cosign
+  mk_tmp
+  b="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
+  curl -fsSL --retry 3 -o "$tmp/cosign_checksums.txt" "$b/cosign_checksums.txt"
+  listed="$(awk '$2 == "cosign-linux-amd64" { print $1 }' "$tmp/cosign_checksums.txt")"
+  if [ "$listed" != "$COSIGN_SHA256_LINUX_AMD64" ]; then
+    echo "ci-install-tools: cosign_checksums.txt ($listed) disagrees with COSIGN_SHA256_LINUX_AMD64 in versions.env" >&2
+    exit 1
+  fi
+  fetch_verified "$b/cosign-linux-amd64" "$COSIGN_SHA256_LINUX_AMD64" "$tmp/cosign"
+  mkdir -p "$BIN_DIR"
+  install -m 0755 "$tmp/cosign" "$BIN_DIR/cosign"
+  rm -rf "$tmp"
+}
+
 # install_go unpacks the verified official tarball into $GO_ROOT_DIR (default ~/.local/go-<version>);
 # put $GO_ROOT_DIR/go/bin on PATH afterwards.
 install_go() {
@@ -96,6 +114,7 @@ install_tool() {
     go) install_go ;;
     trivy) install_tarball_bin trivy "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" "$TRIVY_SHA256_LINUX_AMD64" trivy ;;
     actionlint) install_tarball_bin actionlint "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" "$ACTIONLINT_SHA256_LINUX_AMD64" actionlint ;;
+    cosign) install_cosign ;;
     *) echo "ci-install-tools: unknown tool '$1'" >&2; exit 1 ;;
   esac
   echo "ci-install-tools: installed $1"
