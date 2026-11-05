@@ -85,7 +85,7 @@ func registerFlux(s *server.Server) {
 			"ready, reason, message, revision, suspended, stalled, dependsOn, unhealthy first. blockedBy lists " +
 			"not-Ready objects waiting on dependsOn entries that are not Ready (or missing, or outside what was " +
 			"read). Kinds the cluster does not serve are skipped and listed in missingKinds; with no Flux CRDs the " +
-			"result is installed=false. At most 200 statuses are returned (truncated=true; narrow with namespace, " +
+			"result is installed=false. At most 200 statuses and 200 blockedBy entries are returned (truncated=true; narrow with namespace, " +
 			"kinds or onlyUnhealthy); summary counts everything read before onlyUnhealthy and the cap: ready = Ready condition True (a Stalled but Ready object counts as ready), notReady = not Ready, suspended = spec.suspend true (a Ready but suspended object counts in both ready and suspended). Only status fields are returned, never spec " +
 			"contents, and URL credentials in messages are redacted. Read-only: it never reconciles or patches.",
 	}, server.CapRead, fluxStatus)
@@ -207,10 +207,19 @@ func fluxStatus(ctx context.Context, f kube.Factory, in fluxIn) (any, error) {
 	slices.SortFunc(out.BlockedBy, func(a, b fluxBlocked) int {
 		return cmp.Or(strings.Compare(a.Namespace, b.Namespace), strings.Compare(a.Name, b.Name), strings.Compare(a.Kind, b.Kind))
 	})
-	if max := limits.Default().MaxItems; len(all) > max {
+	max := limits.Default().MaxItems
+	var cut []string
+	if len(all) > max {
 		all = all[:max]
+		cut = append(cut, fmt.Sprintf("more than %d Flux objects match", max))
+	}
+	if len(out.BlockedBy) > max {
+		out.BlockedBy = out.BlockedBy[:max]
+		cut = append(cut, fmt.Sprintf("more than %d blockedBy entries", max))
+	}
+	if len(cut) > 0 {
 		out.Truncated = true
-		out.Note = limits.Note(fmt.Sprintf("more than %d Flux objects match", max), "a namespace, fewer kinds or onlyUnhealthy")
+		out.Note = limits.Note(strings.Join(cut, " and "), "a namespace, fewer kinds or onlyUnhealthy")
 	}
 	out.Statuses = all
 	if out.Statuses == nil {

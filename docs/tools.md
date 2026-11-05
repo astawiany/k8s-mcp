@@ -315,8 +315,10 @@ truncated, note}`.
 - `missingKinds`: kinds the cluster does not serve. Without Flux CRDs the
   result is `installed: false`.
 
-**Limits.** At most 200 statuses. Only status fields are returned, never
-spec contents; credentials in URLs in messages are redacted.
+**Limits.** At most 200 statuses and at most 200 `blockedBy` entries
+(`truncated: true` and a `note` when either cap is hit). Only status fields
+are returned, never spec contents; credentials in URLs in messages are
+redacted.
 
 **Refusals.** Unknown kinds.
 

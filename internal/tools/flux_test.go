@@ -27,6 +27,7 @@ type fOut struct {
 	Statuses     []fStatus `json:"statuses"`
 	MissingKinds []string  `json:"missingKinds"`
 	Truncated    bool      `json:"truncated"`
+	Note         string    `json:"note"`
 	BlockedBy    []struct {
 		Kind      string `json:"kind"`
 		Namespace string `json:"namespace"`
@@ -213,5 +214,28 @@ func TestFluxRejectsUnknownKind(t *testing.T) {
 	res := callTool(t, kube.SingleFakeFactory(kube.NewFakeClient()), "flux_status", map[string]any{"kinds": []string{"Secret"}})
 	if !res.IsError {
 		t.Fatal("expected an error result")
+	}
+}
+
+// TestFluxCapsBlockedBy: one failing source with 300 dependants gives at most
+// 200 blockedBy entries, truncated=true and a note naming blockedBy. Names
+// are short so that 200 statuses plus 200 blockedBy entries fit the 64 KiB
+// document cap (with long names the wrapper's document cut applies as well).
+func TestFluxCapsBlockedBy(t *testing.T) {
+	ks := "kustomize.toolkit.fluxcd.io/v1"
+	c := kube.NewFakeClient(fObj(ks, "Kustomization", "f", "src", false, "Failed", "", nil))
+	for i := 0; i < 300; i++ {
+		c.Add(fObj(ks, "Kustomization", "f", fmt.Sprintf("a%03d", i), false, "Dep", "",
+			map[string]any{"dependsOn": []any{map[string]any{"name": "src"}}}))
+	}
+	out := runFlux(t, c, map[string]any{"kinds": []any{"Kustomization"}})
+	if len(out.BlockedBy) != 200 || !out.Truncated {
+		t.Fatalf("blockedBy=%d truncated=%v", len(out.BlockedBy), out.Truncated)
+	}
+	if !strings.Contains(out.Note, "blockedBy") {
+		t.Errorf("note does not mention blockedBy: %q", out.Note)
+	}
+	if out.BlockedBy[0].Name != "a000" || out.BlockedBy[199].Name != "a199" {
+		t.Errorf("not the first 200 in order: %s..%s", out.BlockedBy[0].Name, out.BlockedBy[199].Name)
 	}
 }
