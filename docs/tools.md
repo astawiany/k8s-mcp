@@ -347,6 +347,15 @@ characters); `description` is plain Markdown; `labels` are `k8s-mcp`,
 **What is done to the input.** Every field is sanitised; URL credentials are
 scrubbed; each line that looks like a credential, and whole private key
 blocks, are masked; a field that looks like a Secret manifest is replaced.
+The assembled description and summary line are checked as a whole too, since
+words from different fields can combine (a summary saying "this kind of
+rollout waits for the secret" plus a quote holding `volume "data"`). When the
+whole trips the check, evidence quotes are withheld one by one, then the
+summary, the object, the evidence refs and the suggested steps (for the
+summary line: the title, then cluster and namespace), each replaced by a fixed
+note and named in `warnings`, until it passes; the draft is never blanked
+silently. A field whose credential masking does not settle after three passes
+is replaced by a fixed note with a warning.
 Markdown and Jira wiki special characters are backslash-escaped, quotes go in
 a fenced block that a quote cannot close, and no link, image or mention
 markup is generated. Bare URLs in the text may still be autolinked by the

@@ -172,9 +172,12 @@ safety on purpose; the result says it was hidden and why.
 
 **`draft_issue`.** Bare URLs in text may still be autolinked by the viewer
 (GitHub, Jira), even though no link markup is generated. Credential masking
-runs as a fixed-point loop that stops after three passes and does not fail
-closed if text still changes. A few line-start constructs (`bq.`, `1)`) are
-not escaped.
+runs as a fixed-point loop of three passes; a field that still changes after
+them is replaced by a fixed note (fail closed). The assembled description and
+summary line get the wrapper's whole-string checks inside the tool, so a field
+withheld because words of several fields combined is named in `warnings`
+instead of the wrapper blanking the whole description. A few line-start
+constructs (`bq.`, `1)`) are not escaped.
 
 **Credential plugins (kubeconfig exec plugin).** An exec plugin (for example
 a cloud CLI) runs as a child of client-go when a context is used. It runs

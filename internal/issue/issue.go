@@ -39,6 +39,15 @@ const (
 // SecretReplacement replaces a field that looks like a Secret manifest.
 const SecretReplacement = "[redacted: looks like a Secret manifest]"
 
+// WithheldNote replaces a field that, only together with the other fields,
+// made the assembled draft match the Secret-manifest or credential check.
+// It holds none of the words that check looks for.
+const WithheldNote = "(withheld by k8s-mcp: together with other fields this text matched the credential check; see warnings)"
+
+// MaskUnstable replaces a field whose credential masking did not reach a
+// fixed point within the passes clean runs.
+const MaskUnstable = "(withheld by k8s-mcp: credential masking did not settle on this text)"
+
 // Evidence is one piece of evidence: a reference and an optional quote.
 type Evidence struct {
 	Ref   string `json:"ref"`
@@ -122,6 +131,9 @@ func maskLine(l string) string {
 
 // maskLines masks whole private key blocks first (per-line masking alone
 // would hide only the BEGIN line and keep the key body), then every line.
+// maskText is the masker clean uses (a variable so a test can make it unstable).
+var maskText = maskLines
+
 func maskLines(s string) string {
 	s, _ = redact.MaskPrivateKeyBlocks(s)
 	lines := strings.Split(s, "\n")
@@ -134,7 +146,7 @@ func maskLines(s string) string {
 // clean runs the pipeline on one field, in this order: Sanitize, strip
 // HTML (only when strip), scrub URL credentials, Secret-manifest check
 // (fail closed), per-line masking, escape envelope markers, and a final
-// check that masking is a fixed point. Tags are stripped before masking so
+// check that masking is a fixed point (fail closed: MaskUnstable otherwise). Tags are stripped before masking so
 // that stripping cannot reassemble a token that masking has already passed.
 func (c *cleaner) clean(field, s string, strip bool) string {
 	s = untrusted.Sanitize(s)
@@ -150,18 +162,23 @@ func (c *cleaner) clean(field, s string, strip bool) string {
 		c.warn("%s: looks like a Secret manifest and was replaced", field)
 		return SecretReplacement
 	}
-	if m := maskLines(s); m != s {
+	if m := maskText(s); m != s {
 		c.warn("%s: a credential was masked", field)
 		s = m
 	}
 	s = untrusted.Escape(zeros, s)
 	for i := 0; i < 3; i++ {
-		m := maskLines(s)
+		m := maskText(s)
 		if m == s {
 			break
 		}
 		c.warn("%s: a credential was masked", field)
 		s = m
+	}
+	// Fail closed: text that masking still changes is not returned.
+	if maskText(s) != s {
+		c.warn("%s: masking did not settle and the field was replaced", field)
+		return MaskUnstable
 	}
 	return s
 }
@@ -251,6 +268,105 @@ func Label(s string) string {
 	return s
 }
 
+// trips reports whether the result wrapper would replace s whole: it looks
+// like a Secret manifest, or the whole text has a credential shape. Draft
+// checks the assembled strings with it, because words from different fields
+// can combine into a match that no single field has.
+func trips(s string) bool {
+	return redact.LooksLikeSecretManifest(s) || redact.EnvValue("", s) == redact.Redacted
+}
+
+// part is one piece of the description. A part with a name holds field text
+// and can be withheld; a part without one is fixed server text.
+type part struct {
+	text string
+	name string
+}
+
+// withholdOrder lists, by field-name prefix, which parts are withheld first
+// when the assembled description trips: quotes, then the summary, then the
+// object, the evidence refs and the suggested steps.
+var withholdOrder = []string{"evidence[", "summary", "object", "ref:", "suggestedNext["}
+
+// assemble joins parts, replacing withheld parts with WithheldNote. When the
+// result still trips, it withholds the next part in withholdOrder (with a
+// warning) and checks again; as a last resort the whole description becomes
+// a fixed sentence. It never returns text that trips.
+func (c *cleaner) assemble(parts []part) string {
+	join := func() string {
+		var b strings.Builder
+		for _, p := range parts {
+			b.WriteString(p.text)
+		}
+		return b.String()
+	}
+	d := join()
+	for _, prefix := range withholdOrder {
+		for i := range parts {
+			if !trips(d) {
+				return d
+			}
+			if parts[i].name == "" || !strings.HasPrefix(parts[i].name, prefix) {
+				continue
+			}
+			parts[i].text = withheld(parts[i].text)
+			c.warn("%s: withheld because, together with other fields, the description looked like a Secret manifest or a credential", strings.TrimPrefix(parts[i].name, "ref:"))
+			d = join()
+		}
+	}
+	if trips(d) {
+		c.warn("description: withheld whole because it still looked like a Secret manifest or a credential")
+		return WithheldNote + "\n\n---\n" + footer + "\n"
+	}
+	return d
+}
+
+// withheld replaces the field text inside a part, keeping the part's fixed
+// layout (fences, list markers and line breaks around it).
+func withheld(text string) string {
+	lead := text[:len(text)-len(strings.TrimLeft(text, "\n- "))]
+	trail := text[len(strings.TrimRight(text, "\n")):]
+	if strings.HasPrefix(strings.TrimLeft(text, "\n"), "Object: ") {
+		lead = text[:len(text)-len(strings.TrimLeft(text, "\n"))] + "Object: "
+	}
+	return lead + WithheldNote + trail
+}
+
+// summaryLine builds "[sev] cluster/namespace: title", cut to
+// MaxSummaryLine. When the line trips (cluster "kind-secret" and namespace
+// "data" do), the title is withheld, then cluster and namespace too, each
+// with a warning, so the wrapper never blanks the line silently.
+func (c *cleaner) summaryLine(sev, cluster, ns, title string) string {
+	where := cluster
+	if ns != "" {
+		where += "/" + ns
+	}
+	candidates := []struct{ line, warning string }{
+		{"[" + sev + "] " + where + ": " + title, ""},
+		{"[" + sev + "] " + where + ": " + WithheldNote, "summary line: title withheld because, together with cluster and namespace, it looked like a Secret manifest or a credential"},
+		{"[" + sev + "] " + WithheldNote, "summary line: title, cluster and namespace withheld because together they looked like a Secret manifest or a credential"},
+	}
+	for _, cand := range candidates {
+		line := cand.line
+		if utf8.RuneCountInString(line) > MaxSummaryLine {
+			line, _ = cut(line, MaxSummaryLine)
+		}
+		if trips(line) {
+			continue
+		}
+		if cand.warning != "" {
+			c.warn("%s", cand.warning)
+		}
+		if line != cand.line {
+			c.warn("summary line was cut to %d characters", MaxSummaryLine)
+		}
+		return line
+	}
+	// Unreachable: the last candidate is fixed text.
+	c.warn("summary line: withheld")
+	return "[" + sev + "]"
+}
+
 // Draft validates in and builds the draft.
 func Draft(in In) (Out, error) {
 	sev := strings.ToLower(strings.TrimSpace(in.Severity))
@@ -273,25 +389,12 @@ func Draft(in In) (Out, error) {
 	_, ns := c.field("namespace", in.Namespace, false, maxField)
 	_, obj := c.field("object", in.Object, false, maxField)
 
-	where := cluster
-	if ns != "" {
-		where += "/" + ns
-	}
-	line := "[" + sev + "] " + where + ": " + title
-	if utf8.RuneCountInString(line) > MaxSummaryLine {
-		line, _ = cut(line, MaxSummaryLine)
-		c.warn("summary line was cut to %d characters", MaxSummaryLine)
-	}
-
-	out := Out{Summary: line}
-	var b strings.Builder
-	b.WriteString("## Summary\n\n" + summary + "\n")
+	out := Out{Summary: c.summaryLine(sev, cluster, ns, title)}
+	parts := []part{{text: "## Summary\n\n"}, {text: summary, name: "summary"}, {text: "\n"}}
 	if obj != "" {
-		b.WriteString("\nObject: " + obj + "\n")
+		parts = append(parts, part{text: "\nObject: " + obj + "\n", name: "object"})
 	}
-	b.WriteString("\n## Impact\n\n" + impact[sev] + "\n")
-
-	b.WriteString("\n## Evidence\n")
+	parts = append(parts, part{text: "\n## Impact\n\n" + impact[sev] + "\n"}, part{text: "\n## Evidence\n"})
 	ev := in.Evidence
 	if len(ev) > MaxEvidence {
 		out.DroppedEvidence = len(ev) - MaxEvidence
@@ -299,14 +402,15 @@ func Draft(in In) (Out, error) {
 		c.warn("only the first %d evidence items were kept; %d dropped", MaxEvidence, out.DroppedEvidence)
 	}
 	if len(ev) == 0 {
-		b.WriteString("\nNo evidence provided.\n")
+		parts = append(parts, part{text: "\nNo evidence provided.\n"})
 	}
 	for i, e := range ev {
-		_, ref := c.field(fmt.Sprintf("evidence[%d].ref", i), e.Ref, false, maxRef)
+		refName := fmt.Sprintf("evidence[%d].ref", i)
+		_, ref := c.field(refName, e.Ref, false, maxRef)
 		if ref == "" {
 			ref = "(no ref)"
 		}
-		b.WriteString("\n- " + ref + "\n")
+		parts = append(parts, part{text: "\n- " + ref + "\n", name: "ref:" + refName})
 		if strings.TrimSpace(e.Quote) == "" {
 			continue
 		}
@@ -324,10 +428,10 @@ func Draft(in In) (Out, error) {
 				lines[j] = `\` + strings.TrimLeft(l, " \t")
 			}
 		}
-		b.WriteString("\n" + fence(strings.Join(lines, "\n")) + "\n")
+		parts = append(parts, part{text: "\n"}, part{text: fence(strings.Join(lines, "\n")), name: name}, part{text: "\n"})
 	}
 
-	b.WriteString("\n## Suggested next steps\n")
+	parts = append(parts, part{text: "\n## Suggested next steps\n"})
 	next := in.SuggestedNext
 	if len(next) > MaxNext {
 		out.DroppedNext = len(next) - MaxNext
@@ -336,18 +440,19 @@ func Draft(in In) (Out, error) {
 	}
 	n := 0
 	for i, s := range next {
-		_, t := c.field(fmt.Sprintf("suggestedNext[%d]", i), s, false, MaxNextLen)
+		name := fmt.Sprintf("suggestedNext[%d]", i)
+		_, t := c.field(name, s, false, MaxNextLen)
 		if t == "" {
 			continue
 		}
-		b.WriteString("\n- " + t)
+		parts = append(parts, part{text: "\n- " + t, name: name})
 		n++
 	}
 	if n == 0 {
-		b.WriteString("\nNo specific next steps suggested.")
+		parts = append(parts, part{text: "\nNo specific next steps suggested."})
 	}
-	b.WriteString("\n\n---\n" + footer + "\n")
-	out.Description = b.String()
+	parts = append(parts, part{text: "\n\n---\n" + footer + "\n"})
+	out.Description = c.assemble(parts)
 
 	// Labels come from the masked cluster name, never from the raw input.
 	cl := Label(clusterRaw)

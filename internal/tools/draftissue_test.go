@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/astawiany/k8s-mcp/internal/issue"
 	"github.com/astawiany/k8s-mcp/internal/kube"
 	"github.com/astawiany/k8s-mcp/internal/server/servertest"
 	"github.com/astawiany/k8s-mcp/internal/tools"
@@ -301,5 +302,59 @@ func TestDraftIssueSuggestedNextCapAndLengthWarnings(t *testing.T) {
 	w := strings.Join(out.Warnings, "|")
 	if !strings.Contains(w, "title was cut") || !strings.Contains(w, "summary was cut") {
 		t.Errorf("warnings = %v", out.Warnings)
+	}
+}
+
+// missingSecretFinding is the regression input of the final review: the
+// summary holds "kind" and "secret", the quote holds `"data"`, so only the
+// assembled description looks like a Secret manifest. The wrapper used to
+// replace the whole description silently (warnings []).
+func missingSecretFinding() map[string]any {
+	return map[string]any{
+		"title": "web pods stuck in ContainerCreating", "severity": "high", "cluster": "prod-1", "namespace": "shop",
+		"summary":  "Every pod of this kind of rollout waits for the secret db-creds, which does not exist.",
+		"evidence": []any{ev("Pod shop/web-1 events", `MountVolume.SetUp failed for volume "data" : secret "db-creds" not found`)},
+	}
+}
+
+func TestDraftIssueCombinedFieldsNeverSilentlyBlanked(t *testing.T) {
+	out := draft(t, missingSecretFinding())
+	if strings.Contains(out.Description, "[redacted") {
+		t.Fatalf("description was blanked: %q warnings=%v", out.Description, out.Warnings)
+	}
+	if !strings.Contains(out.Description, "waits for the secret db-creds") {
+		t.Errorf("summary text lost: %q", out.Description)
+	}
+	if !strings.Contains(out.Description, issue.WithheldNote) {
+		t.Errorf("quote not replaced by the fixed note: %q", out.Description)
+	}
+	if w := strings.Join(out.Warnings, "|"); !strings.Contains(w, "evidence[0].quote") {
+		t.Errorf("no warning for the replaced quote: %v", out.Warnings)
+	}
+}
+
+func TestDraftIssueMissingSecretFindingPassesUntouched(t *testing.T) {
+	out := draft(t, map[string]any{
+		"title": "web pods stuck in ContainerCreating", "severity": "high", "cluster": "prod-1", "namespace": "shop",
+		"summary":  "Every pod of the web rollout waits for the secret db-creds, which does not exist.",
+		"evidence": []any{ev("Pod shop/web-1 events", `MountVolume.SetUp failed for volume "config" : secret "db-creds" not found`)},
+	})
+	if len(out.Warnings) != 0 || strings.Contains(out.Description, issue.WithheldNote) {
+		t.Errorf("legit finding changed: warnings=%v description=%q", out.Warnings, out.Description)
+	}
+	if !strings.Contains(out.Description, `secret "db-creds" not found`) {
+		t.Errorf("quote lost: %q", out.Description)
+	}
+}
+
+func TestDraftIssueSummaryLineNeverSilentlyBlanked(t *testing.T) {
+	// Cluster "kind-secret" and namespace "data" make the summary line read
+	// "[high] kind-secret/data: ...", which matches the manifest check.
+	out := draft(t, with("cluster", "kind-secret", "namespace", "data"))
+	if strings.Contains(out.Summary, "[redacted") || !strings.HasPrefix(out.Summary, "[high] ") {
+		t.Fatalf("summary line blanked: %q warnings=%v", out.Summary, out.Warnings)
+	}
+	if w := strings.Join(out.Warnings, "|"); !strings.Contains(w, "summary line") {
+		t.Errorf("no warning for the replaced summary line: %v", out.Warnings)
 	}
 }
