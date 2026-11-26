@@ -311,10 +311,10 @@ func TestCodeownersAndReadme(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^\* @astawiany$`).MatchString(readFileT(t, filepath.Join(root, ".github", "CODEOWNERS"))) {
 		t.Fatal("CODEOWNERS lacks '* @astawiany'")
 	}
-	readme := readFileT(t, filepath.Join(root, ".github", "README.md"))
+	readme := readFileT(t, filepath.Join(root, "docs", "github-setup.md"))
 	for _, want := range []string{"protect-branch.sh", "Environment", "release-tags", "--approvals 0", "pinned by commit SHA", "Dependabot", "type: User", "upload-artifact", "downloadable by anyone", "expires after 7 days"} {
 		if !strings.Contains(readme, want) {
-			t.Errorf(".github/README.md does not mention %q", want)
+			t.Errorf("docs/github-setup.md does not mention %q", want)
 		}
 	}
 }

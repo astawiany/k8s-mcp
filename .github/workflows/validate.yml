@@ -4,7 +4,7 @@
 # required (see OPTIONAL_JOBS in scripts/protect-branch.sh): it downloads vulnerability databases at
 # run time, and an upstream outage or a newly published CVE must not block unrelated merges.
 #
-# Third-party actions are pinned by commit SHA (see .github/README.md for the bump recipe). Go, kind,
+# Third-party actions are pinned by commit SHA (see docs/github-setup.md for the bump recipe). Go, kind,
 # kubectl and Trivy come from sha256-verified downloads (scripts/ci-install-tools.sh, pins in
 # versions.env), so the third-party actions are actions/checkout and actions/upload-artifact.
 ---

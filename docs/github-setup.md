@@ -1,4 +1,4 @@
-# GitHub setup
+# CI and release setup
 
 What lives here: `workflows/validate.yml` (the gate for `main`), `workflows/release.yml` (publishes
 signed binaries and a signed image on a `v*` tag), `CODEOWNERS` (`* @astawiany`) and this file.
@@ -11,7 +11,7 @@ the Releases) gates `build` (four static binaries, govulncheck per platform), `i
 push, push by digest with SBOM and provenance, cosign sign and verify, then tag) and `release`
 (`cosign sign-blob` bundles, `verify-blob`, `gh release create`). `image` and `release` run in the
 `release` Environment, so each waits for a reviewer. Consumer verification, threat model and the
-release procedure: [docs/security.md](../docs/security.md#verifying-releases). Its third-party actions
+release procedure: [docs/security.md](security.md#verifying-releases). Its third-party actions
 are `actions/checkout`, `actions/upload-artifact` and `actions/download-artifact` (SHA from
 `gh api repos/actions/download-artifact/git/ref/tags/v8.0.2`, released 2026-10-07; v8 fails on an
 artifact digest mismatch by default). cosign, Trivy, BuildKit and the SBOM scanner are pinned in

@@ -6,7 +6,7 @@
 #   --dry-run        print the exact gh api calls and execute nothing (no gh needed)
 #   --approvals N    approving PR reviews required on the branch, 0-6 (default 0: GitHub never lets an
 #                    author approve their own PR, so a solo owner would be locked out with 1). With 1 or
-#                    more, code-owner review is required too. See .github/README.md.
+#                    more, code-owner review is required too. See docs/github-setup.md.
 #   --enforce-admins apply the rules to admins as well (default off, so the owner is never locked out)
 #   --no-protect-tags skip the tag ruleset "release-tags" (prints a warning). By default it is created
 #                    (or updated): only repository admins may create, move or delete v* tags, because a

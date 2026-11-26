@@ -93,7 +93,7 @@ var mdLink = regexp.MustCompile(`\]\(([^)\s]+)\)`)
 // docFiles are the Markdown files whose links are checked.
 func docFiles(t *testing.T, root string) []string {
 	t.Helper()
-	files := []string{"README.md", "STATUS.md", ".github/README.md", "test/injection/eval/README.md"}
+	files := []string{"README.md", "STATUS.md", "test/injection/eval/README.md"}
 	more, err := filepath.Glob(filepath.Join(root, "docs", "*.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func docFiles(t *testing.T, root string) []string {
 func TestMarkdownLinksResolve(t *testing.T) {
 	root := repoRoot(t)
 	files := docFiles(t, root)
-	for _, want := range []string{"docs/tools.md", "docs/threat-model.md", "docs/security.md", ".github/README.md", "test/injection/eval/README.md"} {
+	for _, want := range []string{"docs/tools.md", "docs/threat-model.md", "docs/security.md", "docs/github-setup.md", "test/injection/eval/README.md"} {
 		if !slices.Contains(files, want) {
 			t.Errorf("%s is missing", want)
 		}
