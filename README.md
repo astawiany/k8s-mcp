@@ -148,7 +148,8 @@ contents, tokens or credential plugin output in a tool result.
   about 75 seconds)
 
 Tool versions are pinned in [versions.env](versions.env). Security notes:
-[docs/security.md](docs/security.md). The dated status of the CI and release
+[docs/security.md](docs/security.md). How the CI and release workflows are set
+up: [docs/github-setup.md](docs/github-setup.md). The dated status of those
 workflows and of the behavioural eval: [STATUS.md](STATUS.md).
 
 **Running the published image** (example, adjust the tag and paths). The

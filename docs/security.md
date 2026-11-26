@@ -124,7 +124,7 @@ commands with the tag and image digest filled in.
 ### Release procedure
 
 0. Once per repository: `scripts/protect-branch.sh --repo astawiany/k8s-mcp`
-   (preview with `--dry-run`; see [.github/README.md](../.github/README.md))
+   (preview with `--dry-run`; see [docs/github-setup.md](github-setup.md))
    for branch protection, the `release` Environment and the tag ruleset.
 1. Create the tag from `main` (only admins can, through the ruleset):
    `git tag v0.1.0 origin/main && git push origin v0.1.0`.
