@@ -5,7 +5,7 @@
 # release.yml also passes SOURCE_DATE_EPOCH, so a rebuild of the same commit yields the same image
 # config (the scanned image and the pushed image are compared by config digest).
 # Local build: docker build --build-arg VERSION=v0.0.0-dev -t k8s-mcp:dev .
-FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS build
+FROM golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS build
 ARG VERSION=dev
 ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local
 WORKDIR /src
