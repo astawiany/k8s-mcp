@@ -2,7 +2,7 @@ module github.com/astawiany/k8s-mcp
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
