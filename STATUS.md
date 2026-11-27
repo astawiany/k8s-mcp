@@ -4,7 +4,7 @@ This file records, with dates, what has and has not been exercised outside
 the local test suite. It is not part of the release archives; update it when
 something changes.
 
-As of 2026-11-06:
+As of 2026-11-26:
 
 - **Unit, protocol, injection-corpus and built-binary tests** (`make test`,
   `go test -race ./...`) pass locally.
@@ -29,6 +29,15 @@ As of 2026-11-06:
   digest (`sha256:b5e2b30f...ca934f`), carries an SBOM and provenance, and
   pulls anonymously. The image is linux/amd64 only. This is point-in-time
   evidence about those artefacts, not a guarantee about future releases.
+- **Release `v0.1.1`** (2026-11-26): rebuilt with Go 1.26.11 after govulncheck
+  reported GO-2026-6859 (`net/http`) against go1.26.10, which built `v0.1.0`.
+  Same release workflow, both `release` Environment approvals given by the
+  owner. Verified afterwards the same way as `v0.1.0` (public access, empty
+  Docker config): the signatures of `SHA256SUMS` and of all four archives
+  verify with the exact identity `.../release.yml@refs/tags/v0.1.1`, the
+  checksums match, the macOS binary prints `v0.1.1`, and the image
+  `ghcr.io/astawiany/k8s-mcp` verifies by digest (`sha256:099204d9...cbfa`)
+  and is readable anonymously. Use `v0.1.1` rather than `v0.1.0`.
 - **Acceptance run** (a Claude Code session troubleshooting a deliberately
   broken workload in the fleet-in-a-repo fleet): not yet done.
 - **Behavioural eval** (`test/injection/eval/`): not yet run against a real
