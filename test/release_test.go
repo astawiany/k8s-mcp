@@ -1001,7 +1001,7 @@ func TestReleaseWorkflowStructure(t *testing.T) {
 func TestReleaseWorkflowRulesBite(t *testing.T) {
 	good := readFileT(t, releaseWorkflowPath(t))
 	cases := []struct{ name, from, to, want string }{
-		{"unpinned action", "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "actions/checkout@v4", "not pinned"},
+		{"unpinned action", "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@v4", "not pinned"},
 		{"third-party action", "uses: actions/download-artifact@", "uses: evil/download-artifact@", "third-party action"},
 		{"workflow permissions granted", "permissions: {}", "permissions:\n  contents: write", "must be {}"},
 		{"branch trigger", "    tags: ['v*']", "    tags: ['v*']\n    branches: [main]", "only push of tags"},
