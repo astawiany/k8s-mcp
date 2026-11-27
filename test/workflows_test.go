@@ -201,13 +201,13 @@ func TestValidateWorkflowStructure(t *testing.T) {
 
 func TestValidateWorkflowRulesBite(t *testing.T) {
 	good := readFileT(t, workflowPath(t))
-	pin := "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2"
+	pin := "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1"
 	cases := []struct {
 		name, from, to, want string
 	}{
 		{"unpinned action", pin, "actions/checkout@v4", "not pinned"},
-		{"short sha", "11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2", "11bd719  # v4.2.2", "not pinned"},
-		{"missing version comment", pin, "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683", "no '# vX.Y.Z'"},
+		{"short sha", "3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1", "11bd719  # v4.2.2", "not pinned"},
+		{"missing version comment", pin, "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "no '# vX.Y.Z'"},
 		{"pull_request_target", "  pull_request:\n", "  pull_request_target:\n", "pull_request_target"},
 		{"write permission", "  contents: read\n\nconcurrency", "  contents: write\n\nconcurrency", "contents is write"},
 		{"permissions removed", "permissions:\n  contents: read\n", "", "no workflow-level permissions"},

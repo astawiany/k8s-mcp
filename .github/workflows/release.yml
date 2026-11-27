@@ -44,7 +44,7 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
       owner: ${{ steps.check.outputs.owner }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # full history and all branches: the tagged commit must be an ancestor of origin/main
           fetch-depth: 0
@@ -84,7 +84,7 @@ jobs:
       TARGET_OS: ${{ matrix.goos }}
       TARGET_ARCH: ${{ matrix.goarch }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install Go and govulncheck (pinned)
@@ -126,7 +126,7 @@ jobs:
       IMAGE: ghcr.io/${{ needs.verify.outputs.owner }}/k8s-mcp
       SOURCE: https://github.com/${{ github.repository }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install tools (pinned, sha256-verified)
@@ -210,7 +210,7 @@ jobs:
       TAG: ${{ needs.verify.outputs.tag }}
       IMAGE_REF: ${{ needs.image.outputs.ref }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install cosign (pinned, sha256-verified)

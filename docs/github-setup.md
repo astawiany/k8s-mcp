@@ -65,7 +65,7 @@ stops the go command from fetching another toolchain. The third-party actions ar
 
 ## Action pinning (no Dependabot)
 
-Every `uses:` is pinned by commit SHA with a version comment (`@<40 hex> # v4.2.2`);
+Every `uses:` is pinned by commit SHA with a version comment (`@<40 hex> # v7.0.1`);
 `test/workflows_test.go` fails on anything else. There is no Dependabot: bumps are manual.
 Recipe for an action `owner/repo` at a release tag `vX.Y.Z` that is at least two weeks old:
 
@@ -76,8 +76,8 @@ gh api repos/owner/repo/git/tags/<that sha> --jq .object.sha
 ```
 
 Replace the SHA and the comment in `validate.yml`, read the release notes, run `make test`. The
-current `actions/checkout` pin (v4.2.2) was copied from the sibling project fleet-in-a-repo and
-re-checked with the first command above. Tool pins in `versions.env` carry their own lookup notes.
+current `actions/checkout` pin (v7.0.1, node24) was looked up
+with the first command above (release notes read for v5 to v7). Tool pins in `versions.env` carry their own lookup notes.
 
 ## Settings the repository needs
 
